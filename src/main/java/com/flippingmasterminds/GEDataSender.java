@@ -56,14 +56,12 @@ public class GEDataSender
                 }
 
                 Request request = builder.build();
-                System.out.println("📤 Sending payload to " + serverUrl + ": " + json);
 
                 okHttpClient.newCall(request).enqueue(new Callback()
                 {
                     @Override
                     public void onFailure(Call call, IOException e)
                     {
-                        System.err.println("❌ Failed to send GE data: " + e.getMessage());
                         queue.offer(json); // retry
                     }
 
@@ -72,12 +70,7 @@ public class GEDataSender
                     {
                         if (!response.isSuccessful())
                         {
-                            System.err.println("⚠️ Server responded with: " + response.code());
                             queue.offer(json); // retry
-                        }
-                        else
-                        {
-                            System.out.println("✅ Server accepted GE data: " + response.code());
                         }
                         response.close();
                     }

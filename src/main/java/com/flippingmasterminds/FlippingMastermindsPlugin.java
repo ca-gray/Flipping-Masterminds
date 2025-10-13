@@ -274,7 +274,6 @@ public class FlippingMastermindsPlugin extends Plugin
 		payloadMap.put("buyLimits", buyLimitList);
 
 		String jsonPayload = gson.toJson(payloadMap);
-		System.out.println(jsonPayload);
 
 		// Avoid duplicate sends
 		if (jsonPayload.equals(lastSentPayload))
