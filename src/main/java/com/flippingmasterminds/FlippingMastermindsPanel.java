@@ -74,7 +74,7 @@ public class FlippingMastermindsPanel extends PluginPanel
         buttonPanel.setBorder(BorderFactory.createEmptyBorder(0, 0, 5, 0));
 
         discordButton = createIconHoverButton("/discord_logo.png", "https://discord.gg/VnsS2PP4Vt", "Join our Discord!");
-        githubButton = createIconHoverButton("/github_logo.png", "https://github.com/YOUR_GITHUB_REPO", "View on GitHub!");
+        githubButton = createIconHoverButton("/github_logo.png", "https://github.com/ca-gray/Flipping-Masterminds", "View on GitHub!");
         wikiosButton = createIconHoverButton("/oswiki_logo.png", "https://prices.runescape.wiki/osrs/", "View Wiki Prices!");
 
         buttonPanel.add(discordButton);
