@@ -17,6 +17,9 @@ import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.util.ImageUtil;
 import okhttp3.*;
+import com.google.gson.Gson;
+import okhttp3.OkHttpClient;
+import javax.inject.Inject;
 
 import javax.inject.Inject;
 import javax.swing.*;
@@ -48,8 +51,8 @@ public class FlippingMastermindsPlugin extends Plugin
 
 	private boolean loggedIn = false;
 
-	private final Gson gson = new Gson();
-	private final OkHttpClient httpClient = new OkHttpClient();
+	@Inject private Gson gson;
+	@Inject private OkHttpClient okHttpClient;
 	private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
 	private static final String TARGET_URL = "http://api.flippingmasterminds.net/ge"; //"http://127.0.0.1:5000/ge";
 
@@ -290,7 +293,7 @@ public class FlippingMastermindsPlugin extends Plugin
 				.addHeader("Authorization", "Bearer " + config.apiToken())
 				.build();
 
-		httpClient.newCall(request).enqueue(new Callback()
+		okHttpClient.newCall(request).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
