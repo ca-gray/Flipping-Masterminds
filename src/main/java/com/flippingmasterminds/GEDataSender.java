@@ -2,6 +2,9 @@ package com.flippingmasterminds;
 
 import com.google.gson.Gson;
 import okhttp3.*;
+import com.google.gson.Gson;
+import okhttp3.OkHttpClient;
+import javax.inject.Inject;
 
 import java.io.IOException;
 import java.util.concurrent.BlockingQueue;
@@ -10,9 +13,8 @@ import java.util.concurrent.LinkedBlockingQueue;
 public class GEDataSender
 {
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
-    private static final OkHttpClient client = new OkHttpClient();
-    private static final Gson gson = new Gson();
-
+    @Inject private Gson gson;
+    @Inject private OkHttpClient okHttpClient;
     private final String serverUrl;
     private final String apiToken;
     private final BlockingQueue<String> queue = new LinkedBlockingQueue<>();
@@ -56,7 +58,7 @@ public class GEDataSender
                 Request request = builder.build();
                 System.out.println("📤 Sending payload to " + serverUrl + ": " + json);
 
-                client.newCall(request).enqueue(new Callback()
+                okHttpClient.newCall(request).enqueue(new Callback()
                 {
                     @Override
                     public void onFailure(Call call, IOException e)
@@ -85,14 +87,15 @@ public class GEDataSender
         }
     }
 
-    public void shutdown()
-    {
+    public void shutdown() {
         running = false;
-        client.dispatcher().executorService().shutdown();
-        client.connectionPool().evictAll();
-        if (client.cache() != null)
-        {
-            try { client.cache().close(); } catch (IOException ignored) {}
+        okHttpClient.dispatcher().executorService().shutdown();
+        okHttpClient.connectionPool().evictAll();
+        if (okHttpClient.cache() != null) {
+            try {
+                okHttpClient.cache().close();
+            } catch (IOException ignored) {}
         }
     }
+
 }
