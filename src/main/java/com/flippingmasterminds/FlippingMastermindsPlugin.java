@@ -1,6 +1,7 @@
 package com.flippingmasterminds;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonObject;
 import com.google.inject.Provides;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
@@ -17,17 +18,12 @@ import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.util.ImageUtil;
 import okhttp3.*;
-import com.google.gson.Gson;
-import okhttp3.OkHttpClient;
-import javax.inject.Inject;
 
 import javax.inject.Inject;
 import javax.swing.*;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
@@ -53,11 +49,11 @@ public class FlippingMastermindsPlugin extends Plugin
 
 	@Inject private Gson gson;
 	@Inject private OkHttpClient okHttpClient;
-	private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
-	private static final String TARGET_URL = "http://api.flippingmasterminds.net/ge"; //"http://127.0.0.1:5000/ge";
+	private static final MediaType JSON_MEDIA_TYPE = MediaType.get("application/json; charset=utf-8");
+	private static final String TARGET_URL = "http://api.flippingmasterminds.net/ge";
 
 	private long loginTime = 0;
-	private static final long LOGIN_IGNORE_WINDOW_MS = 3_000; // 3 seconds grace period
+	private static final long LOGIN_IGNORE_WINDOW_MS = 3_000;
 
 	private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 	private ScheduledFuture<?> pendingSend = null;
@@ -117,6 +113,13 @@ public class FlippingMastermindsPlugin extends Plugin
 		{
 			clientToolbar.removeNavigation(navButton);
 		}
+
+		// UPDATED: Correctly dispose of the panel to stop the imageLoader thread
+		if (panel != null)
+		{
+			panel.dispose();
+		}
+
 		if (executor != null)
 		{
 			executor.shutdownNow();
@@ -134,7 +137,7 @@ public class FlippingMastermindsPlugin extends Plugin
 		if (event.getGameState() == GameState.LOGGED_IN)
 		{
 			loggedIn = true;
-			loginTime = System.currentTimeMillis(); // ⏱ Record login time
+			loginTime = System.currentTimeMillis();
 			log.info("Account logged in – Flipping Masterminds GE scanning enabled (cooldown started)");
 		}
 		else if (event.getGameState() == GameState.LOGIN_SCREEN || event.getGameState() == GameState.HOPPING)
@@ -144,7 +147,6 @@ public class FlippingMastermindsPlugin extends Plugin
 		}
 	}
 
-
 	@Subscribe
 	public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event)
 	{
@@ -153,7 +155,6 @@ public class FlippingMastermindsPlugin extends Plugin
 			return;
 		}
 
-		// 🕒 Ignore events within 3 seconds after login
 		long now = System.currentTimeMillis();
 		if (now - loginTime < LOGIN_IGNORE_WINDOW_MS)
 		{
@@ -161,21 +162,17 @@ public class FlippingMastermindsPlugin extends Plugin
 			return;
 		}
 
-
 		GrandExchangeOffer offer = event.getOffer();
 		int slot = event.getSlot();
 
-		// Only track updates for BUYING or BOUGHT offers
 		if (offer.getState() == GrandExchangeOfferState.BUYING || offer.getState() == GrandExchangeOfferState.BOUGHT)
 		{
 			OfferStateCache oldState = lastOfferStates[slot];
 			int newQuantitySold = offer.getQuantitySold();
 			int quantityDelta = 0;
 
-			// Check if there was a previous state for this exact item in this slot
 			if (oldState != null && oldState.itemId == offer.getItemId())
 			{
-				// If the new quantity is greater, we've bought more items
 				if (newQuantitySold > oldState.quantitySold)
 				{
 					quantityDelta = newQuantitySold - oldState.quantitySold;
@@ -183,26 +180,21 @@ public class FlippingMastermindsPlugin extends Plugin
 			}
 			else
 			{
-				// This is the first update for this item in this slot,
-				// so the entire quantity sold so far is the delta.
 				quantityDelta = newQuantitySold;
 			}
 
-			// If we actually bought more items, record the amount
 			if (quantityDelta > 0)
 			{
 				buyLimitTracker.recordBuy(offer.getItemId(), quantityDelta);
 			}
 		}
 
-		// Always update the cache with the newest state for the next event
 		if (offer.getState() != GrandExchangeOfferState.EMPTY) {
 			lastOfferStates[slot] = new OfferStateCache(offer.getItemId(), offer.getQuantitySold());
 		} else {
 			lastOfferStates[slot] = null;
 		}
 
-		// Debounce logic remains the same
 		lastReason = "Slot updated: " + event.getSlot();
 		if (pendingSend != null && !pendingSend.isDone())
 		{
@@ -222,7 +214,6 @@ public class FlippingMastermindsPlugin extends Plugin
 		GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
 		List<Map<String, Object>> offerList = new ArrayList<>();
 
-		// Build offer data
 		for (int i = 0; i < offers.length; i++)
 		{
 			GrandExchangeOffer offer = offers[i];
@@ -245,9 +236,6 @@ public class FlippingMastermindsPlugin extends Plugin
 			offerList.add(slotData);
 		}
 
-		// =========================
-		// Build buyLimits array
-		// =========================
 		List<Map<String, Object>> buyLimitList = new ArrayList<>();
 		Map<Integer, Map<String, Object>> tracked = buyLimitTracker.getAllTracked();
 
@@ -260,9 +248,6 @@ public class FlippingMastermindsPlugin extends Plugin
 			buyLimitList.add(record);
 		}
 
-		// =========================
-		// Build final payload
-		// =========================
 		String playerName = client.getLocalPlayer().getName();
 		long accountHash = client.getAccountHash();
 
@@ -275,17 +260,13 @@ public class FlippingMastermindsPlugin extends Plugin
 
 		String jsonPayload = gson.toJson(payloadMap);
 
-		// Avoid duplicate sends
 		if (jsonPayload.equals(lastSentPayload))
 		{
 			return;
 		}
 		lastSentPayload = jsonPayload;
 
-		// =========================
-		// Send HTTP request
-		// =========================
-		RequestBody body = RequestBody.create(JSON, jsonPayload);
+		RequestBody body = RequestBody.create(JSON_MEDIA_TYPE, jsonPayload);
 		Request request = new Request.Builder()
 				.url(TARGET_URL)
 				.post(body)
@@ -310,8 +291,9 @@ public class FlippingMastermindsPlugin extends Plugin
 			}
 		});
 	}
+
 	// =============================
-	// Price Fetching Methods (unchanged)
+	// Price Fetching Methods (UPDATED to use OkHttpClient)
 	// =============================
 
 	private void fetchAllData()
@@ -352,105 +334,135 @@ public class FlippingMastermindsPlugin extends Plugin
 		return "https://prices.runescape.wiki/api/v1/osrs/24h?timestamp=" + ts;
 	}
 
-	private Map<Integer, Integer> fetchPrices(String urlStr) throws Exception
+	// UPDATED: Uses OkHttpClient instead of HttpURLConnection
+	private Map<Integer, Integer> fetchPrices(String urlStr) throws IOException
 	{
-		URL url = new URL(urlStr);
-		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-		conn.setRequestProperty("User-Agent", USER_AGENT_HEADER);
+		Request request = new Request.Builder()
+				.url(urlStr)
+				.header("User-Agent", USER_AGENT_HEADER)
+				.build();
 
-		try (InputStreamReader reader = new InputStreamReader(conn.getInputStream()))
+		try (Response response = okHttpClient.newCall(request).execute())
 		{
-			Map<Integer, Integer> map = new HashMap<>();
-			var root = gson.fromJson(reader, com.google.gson.JsonObject.class);
-			var data = root.getAsJsonObject("data");
-
-			for (String key : data.keySet())
+			if (!response.isSuccessful() || response.body() == null)
 			{
-				try
-				{
-					int id = Integer.parseInt(key);
-					var obj = data.getAsJsonObject(key);
-					if (obj.has("avgHighPrice") && obj.has("avgLowPrice")
-							&& !obj.get("avgHighPrice").isJsonNull()
-							&& !obj.get("avgLowPrice").isJsonNull())
-					{
-						int high = obj.get("avgHighPrice").getAsInt();
-						int low = obj.get("avgLowPrice").getAsInt();
-						int mid = (high + low) / 2;
-						map.put(id, mid);
-					}
-				}
-				catch (Exception ignored) {}
+				throw new IOException("Failed to fetch prices: " + response.code());
 			}
-			return map;
+
+			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
+			{
+				Map<Integer, Integer> map = new HashMap<>();
+				var root = gson.fromJson(reader, JsonObject.class);
+				var data = root.getAsJsonObject("data");
+
+				for (String key : data.keySet())
+				{
+					try
+					{
+						int id = Integer.parseInt(key);
+						var obj = data.getAsJsonObject(key);
+						if (obj.has("avgHighPrice") && obj.has("avgLowPrice")
+								&& !obj.get("avgHighPrice").isJsonNull()
+								&& !obj.get("avgLowPrice").isJsonNull())
+						{
+							int high = obj.get("avgHighPrice").getAsInt();
+							int low = obj.get("avgLowPrice").getAsInt();
+							int mid = (high + low) / 2;
+							map.put(id, mid);
+						}
+					}
+					catch (Exception ignored) {}
+				}
+				return map;
+			}
 		}
 	}
 
-	private Map<Integer, Integer> fetchLatestPrices(String urlStr) throws Exception
+	// UPDATED: Uses OkHttpClient instead of HttpURLConnection
+	private Map<Integer, Integer> fetchLatestPrices(String urlStr) throws IOException
 	{
-		URL url = new URL(urlStr);
-		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-		conn.setRequestProperty("User-Agent", USER_AGENT_HEADER);
+		Request request = new Request.Builder()
+				.url(urlStr)
+				.header("User-Agent", USER_AGENT_HEADER)
+				.build();
 
-		try (InputStreamReader reader = new InputStreamReader(conn.getInputStream()))
+		try (Response response = okHttpClient.newCall(request).execute())
 		{
-			Map<Integer, Integer> map = new HashMap<>();
-			var root = gson.fromJson(reader, com.google.gson.JsonObject.class);
-			var data = root.getAsJsonObject("data");
-
-			for (String key : data.keySet())
+			if (!response.isSuccessful() || response.body() == null)
 			{
-				try
-				{
-					int id = Integer.parseInt(key);
-					var obj = data.getAsJsonObject(key);
-					if (obj.has("high") && obj.has("low")
-							&& !obj.get("high").isJsonNull()
-							&& !obj.get("low").isJsonNull())
-					{
-						int high = obj.get("high").getAsInt();
-						int low = obj.get("low").getAsInt();
-						int mid = (high + low) / 2;
-						map.put(id, mid);
-					}
-				}
-				catch (Exception ignored) {}
+				throw new IOException("Failed to fetch latest prices: " + response.code());
 			}
-			return map;
+
+			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
+			{
+				Map<Integer, Integer> map = new HashMap<>();
+				var root = gson.fromJson(reader, JsonObject.class);
+				var data = root.getAsJsonObject("data");
+
+				for (String key : data.keySet())
+				{
+					try
+					{
+						int id = Integer.parseInt(key);
+						var obj = data.getAsJsonObject(key);
+						if (obj.has("high") && obj.has("low")
+								&& !obj.get("high").isJsonNull()
+								&& !obj.get("low").isJsonNull())
+						{
+							int high = obj.get("high").getAsInt();
+							int low = obj.get("low").getAsInt();
+							int mid = (high + low) / 2;
+							map.put(id, mid);
+						}
+					}
+					catch (Exception ignored) {}
+				}
+				return map;
+			}
 		}
 	}
 
-	private Map<Integer, ItemMeta> fetchItemMeta(String urlStr) throws Exception
+	// UPDATED: Uses OkHttpClient instead of HttpURLConnection
+	private Map<Integer, ItemMeta> fetchItemMeta(String urlStr) throws IOException
 	{
-		URL url = new URL(urlStr);
-		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-		conn.setRequestProperty("User-Agent", USER_AGENT_HEADER);
+		Request request = new Request.Builder()
+				.url(urlStr)
+				.header("User-Agent", USER_AGENT_HEADER)
+				.build();
 
-		try (InputStreamReader reader = new InputStreamReader(conn.getInputStream()))
+		try (Response response = okHttpClient.newCall(request).execute())
 		{
-			Map<Integer, ItemMeta> map = new HashMap<>();
-			var root = gson.fromJson(reader, com.google.gson.JsonObject.class);
-
-			for (String key : root.keySet())
+			if (!response.isSuccessful() || response.body() == null)
 			{
-				try
-				{
-					int id = Integer.parseInt(key);
-					var obj = root.getAsJsonObject(key);
-					String name = obj.has("name") ? obj.get("name").getAsString() : "Item " + id;
-					String icon = obj.has("icon") ? obj.get("icon").getAsString() : "";
-
-					String safeIcon = icon.replace(" ", "_")
-							.replace("'", "%27")
-							.replace("(", "%28")
-							.replace(")", "%29");
-
-					String iconUrl = "https://oldschool.runescape.wiki/images/c/c0/" + safeIcon + "?7263b";
-					map.put(id, new ItemMeta(id, name, iconUrl));
-				}
-				catch (Exception ignored) {}
+				throw new IOException("Failed to fetch item meta: " + response.code());
 			}
-			return map;
+
+			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
+			{
+				Map<Integer, ItemMeta> map = new HashMap<>();
+				var root = gson.fromJson(reader, JsonObject.class);
+
+				for (String key : root.keySet())
+				{
+					try
+					{
+						int id = Integer.parseInt(key);
+						var obj = root.getAsJsonObject(key);
+						String name = obj.has("name") ? obj.get("name").getAsString() : "Item " + id;
+						String icon = obj.has("icon") ? obj.get("icon").getAsString() : "";
+
+						String safeIcon = icon.replace(" ", "_")
+								.replace("'", "%27")
+								.replace("(", "%28")
+								.replace(")", "%29");
+
+						String iconUrl = "https://oldschool.runescape.wiki/images/c/c0/" + safeIcon + "?7263b";
+						map.put(id, new ItemMeta(id, name, iconUrl));
+					}
+					catch (Exception ignored) {}
+				}
+				return map;
+			}
 		}
 	}
 

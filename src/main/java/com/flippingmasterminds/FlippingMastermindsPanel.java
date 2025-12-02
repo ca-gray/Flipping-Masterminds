@@ -1,6 +1,7 @@
 package com.flippingmasterminds;
 
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.util.LinkBrowser;
 
 import javax.imageio.ImageIO;
 import javax.swing.*;
@@ -9,7 +10,6 @@ import javax.swing.event.DocumentListener;
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
-import java.net.URI;
 import java.net.URL;
 import java.util.List;
 import java.util.*;
@@ -435,10 +435,10 @@ public class FlippingMastermindsPanel extends PluginPanel
         }
     }
 
+    // UPDATED: Use LinkBrowser instead of Desktop.getDesktop()
     private void openUrl(String url)
     {
-        try { Desktop.getDesktop().browse(new URI(url)); }
-        catch (Exception ignored) { }
+        LinkBrowser.browse(url);
     }
 
     private static int safeParseInt(String s, int fallback)
