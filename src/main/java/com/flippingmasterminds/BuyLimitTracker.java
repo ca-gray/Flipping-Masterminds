@@ -40,8 +40,6 @@ public class BuyLimitTracker
         save();
     }
 
-
-
     /**
      * Returns the timestamp (ms) of the first buy in the current 4-hour window.
      * Returns 0 if none exists.
@@ -71,57 +69,60 @@ public class BuyLimitTracker
 
     /**
      * Returns a map of all non-expired tracked items and their buy data.
-     * The key is the item ID, and the value is another map containing buy details.
+     * Automatically removes expired records to prevent memory leaks.
      */
     public synchronized Map<Integer, Map<String, Object>> getAllTracked()
     {
         Map<Integer, Map<String, Object>> trackedData = new HashMap<>();
-        for (Map.Entry<Integer, BuyRecord> entry : records.entrySet())
+
+        // Use an iterator to safely remove elements while looping
+        Iterator<Map.Entry<Integer, BuyRecord>> iterator = records.entrySet().iterator();
+        boolean removedAny = false;
+
+        while (iterator.hasNext())
         {
-            // Only include non-expired records in the payload
-            if (!entry.getValue().isExpired())
+            Map.Entry<Integer, BuyRecord> entry = iterator.next();
+            BuyRecord record = entry.getValue();
+
+            if (record.isExpired())
+            {
+                // Remove the expired entry from the map to free memory
+                iterator.remove();
+                removedAny = true;
+            }
+            else
             {
                 Map<String, Object> itemData = new HashMap<>();
-                itemData.put("firstBuyTimestamp", entry.getValue().getFirstBuyTimestamp());
-                itemData.put("quantityBought", entry.getValue().getQuantityBought());
+                itemData.put("firstBuyTimestamp", record.getFirstBuyTimestamp());
+                itemData.put("quantityBought", record.getQuantityBought());
                 trackedData.put(entry.getKey(), itemData);
             }
         }
+
+        if (removedAny)
+        {
+            save();
+        }
+
         return trackedData;
     }
 
     /**
-     * Optional: remove expired records periodically.
-     */
-    public synchronized void cleanupExpired()
-    {
-        Iterator<Map.Entry<Integer, BuyRecord>> iterator = records.entrySet().iterator();
-        while (iterator.hasNext())
-        {
-            Map.Entry<Integer, BuyRecord> entry = iterator.next();
-            if (entry.getValue().isExpired())
-            {
-                iterator.remove();
-            }
-        }
-        save();
-    }
-
-    /**
      * Load records from config if you want persistence between sessions.
-     * For now, this can be a no-op.
+     * For now, this is a no-op placeholder.
      */
     private void load()
     {
-        // optional: implement persistence later
+        // Placeholder for future persistence logic
     }
 
     /**
      * Save records to config for persistence.
+     * For now, this is a no-op placeholder.
      */
     private void save()
     {
-        // optional: implement persistence later
+        // Placeholder for future persistence logic
     }
 
     // =========================
