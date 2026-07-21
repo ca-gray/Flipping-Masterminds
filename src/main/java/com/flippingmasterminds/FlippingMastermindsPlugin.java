@@ -12,6 +12,7 @@ import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
@@ -53,6 +54,7 @@ public class FlippingMastermindsPlugin extends Plugin
 	private static final String TARGET_URL = "http://api.flippingmasterminds.net/ge";
 
 	private long loginTime = 0;
+	/** Short window after login to let the client fully settle before we fire events. */
 	private static final long LOGIN_IGNORE_WINDOW_MS = 3_000;
 
 	private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -64,21 +66,37 @@ public class FlippingMastermindsPlugin extends Plugin
 	private final OfferStateCache[] lastOfferStates = new OfferStateCache[8];
 
 	private ExecutorService executor;
+
+	// ── Price / volume data held in memory ────────────────────────────────────
 	private Map<Integer, Integer> baselinePrices = new HashMap<>();
-	private Map<Integer, Integer> dayPrices = new HashMap<>();
-	private Map<Integer, Integer> weekPrices = new HashMap<>();
-	private Map<Integer, Integer> monthPrices = new HashMap<>();
-	private Map<Integer, Integer> yearPrices = new HashMap<>();
+	private Map<Integer, Integer> dayPrices      = new HashMap<>();
+	private Map<Integer, Integer> weekPrices     = new HashMap<>();
+	private Map<Integer, Integer> monthPrices    = new HashMap<>();
+	private Map<Integer, Integer> yearPrices     = new HashMap<>();
+
+	private Map<Integer, Integer> dayVolume   = new HashMap<>();
+	private Map<Integer, Integer> weekVolume  = new HashMap<>();
+	private Map<Integer, Integer> monthVolume = new HashMap<>();
+	private Map<Integer, Integer> yearVolume  = new HashMap<>();
+
 	private Map<Integer, ItemMeta> itemMeta = new HashMap<>();
 
 	private static final String USER_AGENT_HEADER = "Call from FMM Plugin, code owner discord: Lindor.";
 
+	// ─────────────────────────────────────────────────────────────────────────
 	@Override
 	protected void startUp()
 	{
 		log.info("Flipping Masterminds plugin started");
 
 		panel = new FlippingMastermindsPanel();
+
+		// Wire the manual-refresh button back to this plugin
+		panel.setOnRefreshRequested(() -> executor.submit(this::fetchAllData));
+
+		// Apply persisted toggle states from config
+		panel.applyConfig(config.showVolume(), config.showPrices());
+
 		BufferedImage icon = null;
 		try
 		{
@@ -109,51 +127,74 @@ public class FlippingMastermindsPlugin extends Plugin
 		log.info("Flipping Masterminds plugin stopped");
 		loggedIn = false;
 
-		if (navButton != null)
-		{
-			clientToolbar.removeNavigation(navButton);
-		}
+		if (navButton != null) clientToolbar.removeNavigation(navButton);
+		if (panel    != null) panel.dispose();
 
-		// UPDATED: Correctly dispose of the panel to stop the imageLoader thread
-		if (panel != null)
-		{
-			panel.dispose();
-		}
+		if (executor != null) executor.shutdownNow();
 
-		if (executor != null)
-		{
-			executor.shutdownNow();
-		}
-		if (pendingSend != null && !pendingSend.isDone())
-		{
-			pendingSend.cancel(false);
-		}
-		scheduler.shutdown();
+		if (pendingSend != null && !pendingSend.isDone()) pendingSend.cancel(false);
+		scheduler.shutdownNow();
 	}
+
+	// ── Game-state events ─────────────────────────────────────────────────────
 
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
 		if (event.getGameState() == GameState.LOGGED_IN)
 		{
-			loggedIn = true;
+			loggedIn  = true;
 			loginTime = System.currentTimeMillis();
-			log.info("Account logged in – Flipping Masterminds GE scanning enabled (cooldown started)");
+			log.info("Account logged in – GE scanning enabled (cooldown started)");
+
+			// Send an immediate GE snapshot on login (if token is set)
+			if (!config.apiToken().isEmpty())
+			{
+				// Schedule just after the ignore window so the client is ready
+				scheduler.schedule(
+						() -> sendOffersIfChanged("Login snapshot"),
+						LOGIN_IGNORE_WINDOW_MS,
+						TimeUnit.MILLISECONDS
+				);
+			}
+			else
+			{
+				log.debug("No API token configured – skipping login snapshot");
+			}
 		}
-		else if (event.getGameState() == GameState.LOGIN_SCREEN || event.getGameState() == GameState.HOPPING)
+		else if (event.getGameState() == GameState.LOGIN_SCREEN
+				|| event.getGameState() == GameState.HOPPING)
 		{
 			loggedIn = false;
-			log.info("Account logged out – Flipping Masterminds GE scanning disabled");
+			log.debug("Account logged out – GE scanning disabled");
 		}
 	}
+
+	// ── Config change events ──────────────────────────────────────────────────
+
+	/**
+	 * Fired whenever any config value changes in the RuneLite settings panel.
+	 * We only care about our own group's display toggles; other keys are ignored.
+	 */
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		if (!"flippingmasterminds".equals(event.getGroup())) return;
+
+		String key = event.getKey();
+		if ("showVolume".equals(key) || "showPrices".equals(key))
+		{
+			SwingUtilities.invokeLater(() ->
+					panel.applyConfig(config.showVolume(), config.showPrices()));
+		}
+	}
+
+	// ── GE offer events ───────────────────────────────────────────────────────
 
 	@Subscribe
 	public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event)
 	{
-		if (!loggedIn || config.apiToken().isEmpty())
-		{
-			return;
-		}
+		if (!loggedIn || config.apiToken().isEmpty()) return;
 
 		long now = System.currentTimeMillis();
 		if (now - loginTime < LOGIN_IGNORE_WINDOW_MS)
@@ -165,18 +206,17 @@ public class FlippingMastermindsPlugin extends Plugin
 		GrandExchangeOffer offer = event.getOffer();
 		int slot = event.getSlot();
 
-		if (offer.getState() == GrandExchangeOfferState.BUYING || offer.getState() == GrandExchangeOfferState.BOUGHT)
+		if (offer.getState() == GrandExchangeOfferState.BUYING
+				|| offer.getState() == GrandExchangeOfferState.BOUGHT)
 		{
-			OfferStateCache oldState = lastOfferStates[slot];
+			OfferStateCache oldState    = lastOfferStates[slot];
 			int newQuantitySold = offer.getQuantitySold();
-			int quantityDelta = 0;
+			int quantityDelta   = 0;
 
 			if (oldState != null && oldState.itemId == offer.getItemId())
 			{
 				if (newQuantitySold > oldState.quantitySold)
-				{
 					quantityDelta = newQuantitySold - oldState.quantitySold;
-				}
 			}
 			else
 			{
@@ -184,40 +224,39 @@ public class FlippingMastermindsPlugin extends Plugin
 			}
 
 			if (quantityDelta > 0)
-			{
 				buyLimitTracker.recordBuy(offer.getItemId(), quantityDelta);
-			}
 		}
 
-		if (offer.getState() != GrandExchangeOfferState.EMPTY) {
+		if (offer.getState() != GrandExchangeOfferState.EMPTY)
 			lastOfferStates[slot] = new OfferStateCache(offer.getItemId(), offer.getQuantitySold());
-		} else {
+		else
 			lastOfferStates[slot] = null;
-		}
 
 		lastReason = "Slot updated: " + event.getSlot();
-		if (pendingSend != null && !pendingSend.isDone())
-		{
-			pendingSend.cancel(false);
-		}
-		pendingSend = scheduler.schedule(() -> sendOffersIfChanged(lastReason), DEBOUNCE_DELAY_MS, TimeUnit.MILLISECONDS);
+		if (pendingSend != null && !pendingSend.isDone()) pendingSend.cancel(false);
+		pendingSend = scheduler.schedule(
+				() -> sendOffersIfChanged(lastReason), DEBOUNCE_DELAY_MS, TimeUnit.MILLISECONDS);
 	}
+
+	// ── Sending GE data ───────────────────────────────────────────────────────
 
 	private void sendOffersIfChanged(String reason)
 	{
-		if (client == null || client.getGrandExchangeOffers() == null || client.getLocalPlayer() == null)
+		if (client == null
+				|| client.getGrandExchangeOffers() == null
+				|| client.getLocalPlayer()        == null)
 		{
-			log.info("Client not ready yet.");
+			log.debug("sendOffersIfChanged: client not ready, skipping");
 			return;
 		}
 
-		GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
-		List<Map<String, Object>> offerList = new ArrayList<>();
+		GrandExchangeOffer[]          offers    = client.getGrandExchangeOffers();
+		List<Map<String, Object>>     offerList = new ArrayList<>();
 
 		for (int i = 0; i < offers.length; i++)
 		{
-			GrandExchangeOffer offer = offers[i];
-			Map<String, Object> slotData = new HashMap<>();
+			GrandExchangeOffer    offer    = offers[i];
+			Map<String, Object>   slotData = new HashMap<>();
 			slotData.put("slot", i);
 
 			if (offer == null || offer.getState() == GrandExchangeOfferState.EMPTY)
@@ -226,48 +265,43 @@ public class FlippingMastermindsPlugin extends Plugin
 			}
 			else
 			{
-				slotData.put("state", offer.getState().toString());
-				slotData.put("itemId", offer.getItemId());
-				slotData.put("quantitySold", offer.getQuantitySold());
-				slotData.put("totalQuantity", offer.getTotalQuantity());
-				slotData.put("price", offer.getPrice());
+				slotData.put("state",          offer.getState().toString());
+				slotData.put("itemId",         offer.getItemId());
+				slotData.put("quantitySold",   offer.getQuantitySold());
+				slotData.put("totalQuantity",  offer.getTotalQuantity());
+				slotData.put("price",          offer.getPrice());
 			}
-
 			offerList.add(slotData);
 		}
 
-		List<Map<String, Object>> buyLimitList = new ArrayList<>();
-		Map<Integer, Map<String, Object>> tracked = buyLimitTracker.getAllTracked();
+		List<Map<String, Object>>          buyLimitList = new ArrayList<>();
+		Map<Integer, Map<String, Object>>  tracked      = buyLimitTracker.getAllTracked();
 
 		for (Map.Entry<Integer, Map<String, Object>> entry : tracked.entrySet())
 		{
 			Map<String, Object> record = new HashMap<>();
-			record.put("itemId", entry.getKey());
-			record.put("quantityBought", entry.getValue().get("quantityBought"));
+			record.put("itemId",            entry.getKey());
+			record.put("quantityBought",    entry.getValue().get("quantityBought"));
 			record.put("firstBuyTimestamp", entry.getValue().get("firstBuyTimestamp"));
 			buyLimitList.add(record);
 		}
 
-		String playerName = client.getLocalPlayer().getName();
-		long accountHash = client.getAccountHash();
+		String playerName  = client.getLocalPlayer().getName();
+		long   accountHash = client.getAccountHash();
 
 		Map<String, Object> payloadMap = new HashMap<>();
-		payloadMap.put("reason", reason);
-		payloadMap.put("playerName", playerName);
+		payloadMap.put("reason",      reason);
+		payloadMap.put("playerName",  playerName);
 		payloadMap.put("accountHash", accountHash);
-		payloadMap.put("offers", offerList);
-		payloadMap.put("buyLimits", buyLimitList);
+		payloadMap.put("offers",      offerList);
+		payloadMap.put("buyLimits",   buyLimitList);
 
 		String jsonPayload = gson.toJson(payloadMap);
-
-		if (jsonPayload.equals(lastSentPayload))
-		{
-			return;
-		}
+		if (jsonPayload.equals(lastSentPayload)) return;
 		lastSentPayload = jsonPayload;
 
-		RequestBody body = RequestBody.create(JSON_MEDIA_TYPE, jsonPayload);
-		Request request = new Request.Builder()
+		RequestBody body    = RequestBody.create(JSON_MEDIA_TYPE, jsonPayload);
+		Request     request = new Request.Builder()
 				.url(TARGET_URL)
 				.post(body)
 				.addHeader("Authorization", "Bearer " + config.apiToken())
@@ -284,41 +318,65 @@ public class FlippingMastermindsPlugin extends Plugin
 			@Override
 			public void onResponse(Call call, Response response) throws IOException
 			{
-				int code = response.code();
+				int    code = response.code();
 				String resp = response.body() != null ? response.body().string() : "";
 				response.close();
-				log.info("✅ GE data sent for {} | Response {}: {}", playerName, code, resp);
+				log.info("✅ GE data sent ({}) for {} | Response {}: {}", reason, playerName, code, resp);
 			}
 		});
 	}
 
-	// =============================
-	// Price Fetching Methods (UPDATED to use OkHttpClient)
-	// =============================
+	// ── Price / volume fetching ───────────────────────────────────────────────
 
-	private void fetchAllData()
+	/** Fetches all price and volume data then pushes it to the panel. */
+	void fetchAllData()
 	{
 		try
 		{
 			baselinePrices = fetchLatestPrices("https://prices.runescape.wiki/api/v1/osrs/latest");
 
 			long now = Instant.now().getEpochSecond();
-			dayPrices = fetchPrices(makeUrl1h(now, 86400));
-			weekPrices = fetchPrices(makeUrl1h(now, 604800));
-			monthPrices = fetchPrices(makeUrl24h(now, 2629743));
-			yearPrices = fetchPrices(makeUrl24h(now, 31556926));
+
+			PriceAndVolume day1h   = fetchPricesAndVolume(makeUrl1h(now, 86400));
+			PriceAndVolume week1h  = fetchPricesAndVolume(makeUrl1h(now, 604800));
+			PriceAndVolume month24 = fetchPricesAndVolume(makeUrl24h(now, 2629743));
+			PriceAndVolume year24  = fetchPricesAndVolume(makeUrl24h(now, 31556926));
+
+			dayPrices   = day1h.prices;
+			weekPrices  = week1h.prices;
+			monthPrices = month24.prices;
+			yearPrices  = year24.prices;
+
+			dayVolume   = day1h.volume;
+			weekVolume  = week1h.volume;
+			monthVolume = month24.volume;
+			yearVolume  = year24.volume;
 
 			itemMeta = fetchItemMeta("https://chisel.weirdgloop.org/gazproj/gazbot/os_dump.json");
 
 			SwingUtilities.invokeLater(() -> panel.updateMovers(
-					baselinePrices, dayPrices, weekPrices, monthPrices, yearPrices, itemMeta
+					baselinePrices,
+					dayPrices, weekPrices, monthPrices, yearPrices,
+					itemMeta,
+					dayVolume, weekVolume, monthVolume, yearVolume
 			));
 		}
 		catch (Exception e)
 		{
 			log.error("❌ Failed to fetch price data", e);
+			// Re-enable the refresh button even on failure
+			SwingUtilities.invokeLater(() -> {
+				panel.updateMovers(
+						baselinePrices,
+						dayPrices, weekPrices, monthPrices, yearPrices,
+						itemMeta,
+						dayVolume, weekVolume, monthVolume, yearVolume
+				);
+			});
 		}
 	}
+
+	// ── URL helpers ───────────────────────────────────────────────────────────
 
 	private String makeUrl1h(long now, long offset)
 	{
@@ -334,8 +392,10 @@ public class FlippingMastermindsPlugin extends Plugin
 		return "https://prices.runescape.wiki/api/v1/osrs/24h?timestamp=" + ts;
 	}
 
-	// UPDATED: Uses OkHttpClient instead of HttpURLConnection
-	private Map<Integer, Integer> fetchPrices(String urlStr) throws IOException
+	// ── HTTP fetchers ─────────────────────────────────────────────────────────
+
+	/** Fetches a timestamped price endpoint and returns both mid-prices and trade volumes. */
+	private PriceAndVolume fetchPricesAndVolume(String urlStr) throws IOException
 	{
 		Request request = new Request.Builder()
 				.url(urlStr)
@@ -345,13 +405,13 @@ public class FlippingMastermindsPlugin extends Plugin
 		try (Response response = okHttpClient.newCall(request).execute())
 		{
 			if (!response.isSuccessful() || response.body() == null)
-			{
 				throw new IOException("Failed to fetch prices: " + response.code());
-			}
 
 			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
 			{
-				Map<Integer, Integer> map = new HashMap<>();
+				Map<Integer, Integer> prices = new HashMap<>();
+				Map<Integer, Integer> volume = new HashMap<>();
+
 				var root = gson.fromJson(reader, JsonObject.class);
 				var data = root.getAsJsonObject("data");
 
@@ -359,26 +419,34 @@ public class FlippingMastermindsPlugin extends Plugin
 				{
 					try
 					{
-						int id = Integer.parseInt(key);
+						int id  = Integer.parseInt(key);
 						var obj = data.getAsJsonObject(key);
+
+						// Price
 						if (obj.has("avgHighPrice") && obj.has("avgLowPrice")
 								&& !obj.get("avgHighPrice").isJsonNull()
 								&& !obj.get("avgLowPrice").isJsonNull())
 						{
 							int high = obj.get("avgHighPrice").getAsInt();
-							int low = obj.get("avgLowPrice").getAsInt();
-							int mid = (high + low) / 2;
-							map.put(id, mid);
+							int low  = obj.get("avgLowPrice").getAsInt();
+							prices.put(id, (high + low) / 2);
 						}
+
+						// Volume – sum of highPriceVolume + lowPriceVolume
+						int vol = 0;
+						if (obj.has("highPriceVolume") && !obj.get("highPriceVolume").isJsonNull())
+							vol += obj.get("highPriceVolume").getAsInt();
+						if (obj.has("lowPriceVolume") && !obj.get("lowPriceVolume").isJsonNull())
+							vol += obj.get("lowPriceVolume").getAsInt();
+						if (vol > 0) volume.put(id, vol);
 					}
 					catch (Exception ignored) {}
 				}
-				return map;
+				return new PriceAndVolume(prices, volume);
 			}
 		}
 	}
 
-	// UPDATED: Uses OkHttpClient instead of HttpURLConnection
 	private Map<Integer, Integer> fetchLatestPrices(String urlStr) throws IOException
 	{
 		Request request = new Request.Builder()
@@ -389,13 +457,11 @@ public class FlippingMastermindsPlugin extends Plugin
 		try (Response response = okHttpClient.newCall(request).execute())
 		{
 			if (!response.isSuccessful() || response.body() == null)
-			{
 				throw new IOException("Failed to fetch latest prices: " + response.code());
-			}
 
 			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
 			{
-				Map<Integer, Integer> map = new HashMap<>();
+				Map<Integer, Integer> map  = new HashMap<>();
 				var root = gson.fromJson(reader, JsonObject.class);
 				var data = root.getAsJsonObject("data");
 
@@ -403,16 +469,15 @@ public class FlippingMastermindsPlugin extends Plugin
 				{
 					try
 					{
-						int id = Integer.parseInt(key);
+						int id  = Integer.parseInt(key);
 						var obj = data.getAsJsonObject(key);
 						if (obj.has("high") && obj.has("low")
 								&& !obj.get("high").isJsonNull()
 								&& !obj.get("low").isJsonNull())
 						{
 							int high = obj.get("high").getAsInt();
-							int low = obj.get("low").getAsInt();
-							int mid = (high + low) / 2;
-							map.put(id, mid);
+							int low  = obj.get("low").getAsInt();
+							map.put(id, (high + low) / 2);
 						}
 					}
 					catch (Exception ignored) {}
@@ -422,7 +487,6 @@ public class FlippingMastermindsPlugin extends Plugin
 		}
 	}
 
-	// UPDATED: Uses OkHttpClient instead of HttpURLConnection
 	private Map<Integer, ItemMeta> fetchItemMeta(String urlStr) throws IOException
 	{
 		Request request = new Request.Builder()
@@ -433,25 +497,24 @@ public class FlippingMastermindsPlugin extends Plugin
 		try (Response response = okHttpClient.newCall(request).execute())
 		{
 			if (!response.isSuccessful() || response.body() == null)
-			{
 				throw new IOException("Failed to fetch item meta: " + response.code());
-			}
 
 			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
 			{
-				Map<Integer, ItemMeta> map = new HashMap<>();
+				Map<Integer, ItemMeta> map  = new HashMap<>();
 				var root = gson.fromJson(reader, JsonObject.class);
 
 				for (String key : root.keySet())
 				{
 					try
 					{
-						int id = Integer.parseInt(key);
-						var obj = root.getAsJsonObject(key);
+						int    id   = Integer.parseInt(key);
+						var    obj  = root.getAsJsonObject(key);
 						String name = obj.has("name") ? obj.get("name").getAsString() : "Item " + id;
 						String icon = obj.has("icon") ? obj.get("icon").getAsString() : "";
 
-						String safeIcon = icon.replace(" ", "_")
+						String safeIcon = icon
+								.replace(" ", "_")
 								.replace("'", "%27")
 								.replace("(", "%28")
 								.replace(")", "%29");
@@ -466,6 +529,8 @@ public class FlippingMastermindsPlugin extends Plugin
 		}
 	}
 
+	// ── Guice providers ───────────────────────────────────────────────────────
+
 	@Provides
 	BuyLimitTracker provideBuyLimitTracker(ConfigManager configManager)
 	{
@@ -478,6 +543,8 @@ public class FlippingMastermindsPlugin extends Plugin
 		return configManager.getConfig(FlippingMastermindsConfig.class);
 	}
 
+	// ── Inner / static types ──────────────────────────────────────────────────
+
 	private static class OfferStateCache
 	{
 		int itemId;
@@ -485,21 +552,34 @@ public class FlippingMastermindsPlugin extends Plugin
 
 		OfferStateCache(int itemId, int quantitySold)
 		{
-			this.itemId = itemId;
+			this.itemId       = itemId;
 			this.quantitySold = quantitySold;
+		}
+	}
+
+	/** Holds both prices and trade volumes returned from one API call. */
+	private static class PriceAndVolume
+	{
+		final Map<Integer, Integer> prices;
+		final Map<Integer, Integer> volume;
+
+		PriceAndVolume(Map<Integer, Integer> prices, Map<Integer, Integer> volume)
+		{
+			this.prices = prices;
+			this.volume = volume;
 		}
 	}
 
 	public static class ItemMeta
 	{
-		public final int id;
+		public final int    id;
 		public final String name;
 		public final String iconUrl;
 
 		public ItemMeta(int id, String name, String iconUrl)
 		{
-			this.id = id;
-			this.name = name;
+			this.id      = id;
+			this.name    = name;
 			this.iconUrl = iconUrl;
 		}
 	}
