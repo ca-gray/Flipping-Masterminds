@@ -68,16 +68,17 @@ public class FlippingMastermindsPlugin extends Plugin
 	private ExecutorService executor;
 
 	// ── Price / volume data held in memory ────────────────────────────────────
-	private Map<Integer, Integer> baselinePrices = new HashMap<>();
-	private Map<Integer, Integer> dayPrices      = new HashMap<>();
-	private Map<Integer, Integer> weekPrices     = new HashMap<>();
-	private Map<Integer, Integer> monthPrices    = new HashMap<>();
-	private Map<Integer, Integer> yearPrices     = new HashMap<>();
+	// CHANGED: Integer → Long to support prices > 2,147,483,647 gp (v2 API requirement)
+	private Map<Integer, Long> baselinePrices = new HashMap<>();
+	private Map<Integer, Long> dayPrices      = new HashMap<>();
+	private Map<Integer, Long> weekPrices     = new HashMap<>();
+	private Map<Integer, Long> monthPrices    = new HashMap<>();
+	private Map<Integer, Long> yearPrices     = new HashMap<>();
 
-	private Map<Integer, Integer> dayVolume   = new HashMap<>();
-	private Map<Integer, Integer> weekVolume  = new HashMap<>();
-	private Map<Integer, Integer> monthVolume = new HashMap<>();
-	private Map<Integer, Integer> yearVolume  = new HashMap<>();
+	private Map<Integer, Long> dayVolume   = new HashMap<>();
+	private Map<Integer, Long> weekVolume  = new HashMap<>();
+	private Map<Integer, Long> monthVolume = new HashMap<>();
+	private Map<Integer, Long> yearVolume  = new HashMap<>();
 
 	private Map<Integer, ItemMeta> itemMeta = new HashMap<>();
 
@@ -333,7 +334,8 @@ public class FlippingMastermindsPlugin extends Plugin
 	{
 		try
 		{
-			baselinePrices = fetchLatestPrices("https://prices.runescape.wiki/api/v1/osrs/latest");
+			// CHANGED: /v1/osrs/latest → /v2/osrs/latest
+			baselinePrices = fetchLatestPrices("https://prices.runescape.wiki/api/v2/osrs/latest");
 
 			long now = Instant.now().getEpochSecond();
 
@@ -382,19 +384,23 @@ public class FlippingMastermindsPlugin extends Plugin
 	{
 		long ts = now - offset;
 		ts -= ts % 3600;
-		return "https://prices.runescape.wiki/api/v1/osrs/1h?timestamp=" + ts;
+		return "https://prices.runescape.wiki/api/v2/osrs/1h?timestamp=" + ts;
 	}
 
 	private String makeUrl24h(long now, long offset)
 	{
 		long ts = now - offset;
 		ts -= ts % 86400;
-		return "https://prices.runescape.wiki/api/v1/osrs/24h?timestamp=" + ts;
+		return "https://prices.runescape.wiki/api/v2/osrs/24h?timestamp=" + ts;
 	}
 
 	// ── HTTP fetchers ─────────────────────────────────────────────────────────
 
-	/** Fetches a timestamped price endpoint and returns both mid-prices and trade volumes. */
+	/**
+	 * Fetches a timestamped price endpoint and returns both mid-prices and trade volumes.
+	 * CHANGED: return type uses Long values to handle prices > Integer.MAX_VALUE.
+	 * CHANGED: avgHighPrice/avgLowPrice parsed as double (v2 allows up to 2 decimal places).
+	 */
 	private PriceAndVolume fetchPricesAndVolume(String urlStr) throws IOException
 	{
 		Request request = new Request.Builder()
@@ -409,8 +415,9 @@ public class FlippingMastermindsPlugin extends Plugin
 
 			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
 			{
-				Map<Integer, Integer> prices = new HashMap<>();
-				Map<Integer, Integer> volume = new HashMap<>();
+				// CHANGED: Map value type Integer → Long
+				Map<Integer, Long> prices = new HashMap<>();
+				Map<Integer, Long> volume = new HashMap<>();
 
 				var root = gson.fromJson(reader, JsonObject.class);
 				var data = root.getAsJsonObject("data");
@@ -422,22 +429,24 @@ public class FlippingMastermindsPlugin extends Plugin
 						int id  = Integer.parseInt(key);
 						var obj = data.getAsJsonObject(key);
 
-						// Price
+						// CHANGED: getAsDouble() instead of getAsInt() — v2 allows decimals.
+						// Math.round() gives us the nearest long, safe for > 32-bit values.
 						if (obj.has("avgHighPrice") && obj.has("avgLowPrice")
 								&& !obj.get("avgHighPrice").isJsonNull()
 								&& !obj.get("avgLowPrice").isJsonNull())
 						{
-							int high = obj.get("avgHighPrice").getAsInt();
-							int low  = obj.get("avgLowPrice").getAsInt();
-							prices.put(id, (high + low) / 2);
+							double high = obj.get("avgHighPrice").getAsDouble();
+							double low  = obj.get("avgLowPrice").getAsDouble();
+							prices.put(id, Math.round((high + low) / 2.0));
 						}
 
 						// Volume – sum of highPriceVolume + lowPriceVolume
-						int vol = 0;
+						// CHANGED: accumulate into long to avoid int overflow on high-volume items
+						long vol = 0;
 						if (obj.has("highPriceVolume") && !obj.get("highPriceVolume").isJsonNull())
-							vol += obj.get("highPriceVolume").getAsInt();
+							vol += obj.get("highPriceVolume").getAsLong();
 						if (obj.has("lowPriceVolume") && !obj.get("lowPriceVolume").isJsonNull())
-							vol += obj.get("lowPriceVolume").getAsInt();
+							vol += obj.get("lowPriceVolume").getAsLong();
 						if (vol > 0) volume.put(id, vol);
 					}
 					catch (Exception ignored) {}
@@ -447,7 +456,11 @@ public class FlippingMastermindsPlugin extends Plugin
 		}
 	}
 
-	private Map<Integer, Integer> fetchLatestPrices(String urlStr) throws IOException
+	/**
+	 * Fetches the /latest endpoint for current spot prices.
+	 * CHANGED: return type Long; getAsLong() used so values > Integer.MAX_VALUE are safe.
+	 */
+	private Map<Integer, Long> fetchLatestPrices(String urlStr) throws IOException
 	{
 		Request request = new Request.Builder()
 				.url(urlStr)
@@ -461,7 +474,8 @@ public class FlippingMastermindsPlugin extends Plugin
 
 			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
 			{
-				Map<Integer, Integer> map  = new HashMap<>();
+				// CHANGED: Map value type Integer → Long
+				Map<Integer, Long> map  = new HashMap<>();
 				var root = gson.fromJson(reader, JsonObject.class);
 				var data = root.getAsJsonObject("data");
 
@@ -475,8 +489,9 @@ public class FlippingMastermindsPlugin extends Plugin
 								&& !obj.get("high").isJsonNull()
 								&& !obj.get("low").isJsonNull())
 						{
-							int high = obj.get("high").getAsInt();
-							int low  = obj.get("low").getAsInt();
+							// CHANGED: getAsLong() — latest prices are integers but can exceed int max
+							long high = obj.get("high").getAsLong();
+							long low  = obj.get("low").getAsLong();
 							map.put(id, (high + low) / 2);
 						}
 					}
@@ -557,13 +572,16 @@ public class FlippingMastermindsPlugin extends Plugin
 		}
 	}
 
-	/** Holds both prices and trade volumes returned from one API call. */
+	/**
+	 * Holds both prices and trade volumes returned from one API call.
+	 * CHANGED: Map value type Integer → Long throughout.
+	 */
 	private static class PriceAndVolume
 	{
-		final Map<Integer, Integer> prices;
-		final Map<Integer, Integer> volume;
+		final Map<Integer, Long> prices;
+		final Map<Integer, Long> volume;
 
-		PriceAndVolume(Map<Integer, Integer> prices, Map<Integer, Integer> volume)
+		PriceAndVolume(Map<Integer, Long> prices, Map<Integer, Long> volume)
 		{
 			this.prices = prices;
 			this.volume = volume;

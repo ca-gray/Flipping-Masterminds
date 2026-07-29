@@ -48,12 +48,13 @@ public class FlippingMastermindsPanel extends PluginPanel
     private int currentPage = 0;
 
     // ── Data ──────────────────────────────────────────────────────────────────
-    private Map<Integer, Integer> baseline, day, week, month, year;
+    // CHANGED: Map value type Integer → Long to handle prices > Integer.MAX_VALUE
+    private Map<Integer, Long> baseline, day, week, month, year;
     private Map<Integer, FlippingMastermindsPlugin.ItemMeta> meta;
-    private Map<Integer, Integer> dayVolume    = Collections.emptyMap();
-    private Map<Integer, Integer> weekVolume   = Collections.emptyMap();
-    private Map<Integer, Integer> monthVolume  = Collections.emptyMap();
-    private Map<Integer, Integer> yearVolume   = Collections.emptyMap();
+    private Map<Integer, Long> dayVolume    = Collections.emptyMap();
+    private Map<Integer, Long> weekVolume   = Collections.emptyMap();
+    private Map<Integer, Long> monthVolume  = Collections.emptyMap();
+    private Map<Integer, Long> yearVolume   = Collections.emptyMap();
 
     // ── Image loading ─────────────────────────────────────────────────────────
     private final ConcurrentMap<Integer, ImageIcon> imageCache = new ConcurrentHashMap<>();
@@ -188,9 +189,11 @@ public class FlippingMastermindsPanel extends PluginPanel
         filterPanel.add(minPriceField, fld);
 
         // Row 3 – Max Price
+        // CHANGED: default was Integer.MAX_VALUE (2147483647); raised to Long.MAX_VALUE
+        // so items priced above the old int ceiling aren't excluded by default
         lbl.gridy++; fld.gridy++;
         filterPanel.add(new JLabel("Max Price:"), lbl);
-        maxPriceField = new JTextField("2147483647");
+        maxPriceField = new JTextField(String.valueOf(Long.MAX_VALUE));
         filterPanel.add(maxPriceField, fld);
 
         // Row 4 – Min Volume
@@ -285,17 +288,18 @@ public class FlippingMastermindsPanel extends PluginPanel
 
     // ── Public data entry point ───────────────────────────────────────────────
 
+    // CHANGED: all Map<Integer, Integer> price/volume parameters → Map<Integer, Long>
     public void updateMovers(
-            Map<Integer, Integer> baseline,
-            Map<Integer, Integer> day,
-            Map<Integer, Integer> week,
-            Map<Integer, Integer> month,
-            Map<Integer, Integer> year,
+            Map<Integer, Long> baseline,
+            Map<Integer, Long> day,
+            Map<Integer, Long> week,
+            Map<Integer, Long> month,
+            Map<Integer, Long> year,
             Map<Integer, FlippingMastermindsPlugin.ItemMeta> meta,
-            Map<Integer, Integer> dayVolume,
-            Map<Integer, Integer> weekVolume,
-            Map<Integer, Integer> monthVolume,
-            Map<Integer, Integer> yearVolume)
+            Map<Integer, Long> dayVolume,
+            Map<Integer, Long> weekVolume,
+            Map<Integer, Long> monthVolume,
+            Map<Integer, Long> yearVolume)
     {
         this.baseline    = baseline;
         this.day         = day;
@@ -326,14 +330,16 @@ public class FlippingMastermindsPanel extends PluginPanel
     {
         String timeRange = safeSelected(timeRangeDropdown,   "Day");
         String perf      = safeSelected(performanceDropdown, "Top Performers");
-        int    min       = safeParseInt(minPriceField.getText(),  1);
-        int    max       = safeParseInt(maxPriceField.getText(),  Integer.MAX_VALUE);
-        int    minVol    = safeParseInt(minVolumeField.getText(), 0);
+        // CHANGED: min/max price filters now parsed as long
+        long   min       = safeParseLong(minPriceField.getText(),  1L);
+        long   max       = safeParseLong(maxPriceField.getText(),  Long.MAX_VALUE);
+        long   minVol    = safeParseLong(minVolumeField.getText(), 0L);
 
         if (min > max) return;
 
-        Map<Integer, Integer> snapshot;
-        Map<Integer, Integer> volumeMap;
+        // CHANGED: snapshot and volumeMap are Map<Integer, Long>
+        Map<Integer, Long> snapshot;
+        Map<Integer, Long> volumeMap;
         switch (timeRange)
         {
             case "Week":  snapshot = week;  volumeMap = weekVolume;  break;
@@ -345,20 +351,23 @@ public class FlippingMastermindsPanel extends PluginPanel
         if (volumeMap == null) volumeMap = Collections.emptyMap();
 
         List<Row> rows = new ArrayList<>();
-        for (Map.Entry<Integer, Integer> e : snapshot.entrySet())
+        for (Map.Entry<Integer, Long> e : baseline.entrySet())
         {
-            int id        = e.getKey();
-            int snapPrice = e.getValue();
-            int curPrice  = baseline.getOrDefault(id, -1);
+            int  id        = e.getKey();
+            long curPrice = e.getValue();
+            long snapPrice  = snapshot.getOrDefault(id, -1L);
 
             if (curPrice <= 0 || snapPrice <= 0) continue;
-            if (snapPrice < min || snapPrice > max) continue;
+            // Filter on current (baseline) price, NOT the historical snapshot price.
+            // This keeps the item list consistent when switching time ranges —
+            // only the % change column varies, never which items are shown.
+            if (curPrice < min || curPrice > max) continue;
 
-            int volume = volumeMap.getOrDefault(id, 0);
+            long volume = volumeMap.getOrDefault(id, 0L);
             if (volume < minVol) continue;
 
             double changePct = ((double)(curPrice - snapPrice) / snapPrice) * 100.0;
-            int    changeAbs = curPrice - snapPrice;
+            long   changeAbs = curPrice - snapPrice;
 
             if (perf.equals("Top Performers")  && !(changePct > 0.0)) continue;
             if (perf.equals("Underperformers") && !(changePct < 0.0)) continue;
@@ -421,6 +430,7 @@ public class FlippingMastermindsPanel extends PluginPanel
         nameLabel.setToolTipText(r.fullName);
         textPanel.add(nameLabel);
 
+        // CHANGED: formatGp now takes long
         String absText   = (r.changeAbs > 0 ? "+" : "") + formatGp(r.changeAbs);
         Color  changeClr = r.changeAbs >= 0 ? new Color(0, 192, 0) : new Color(220, 50, 50);
         JLabel changeLabel = new JLabel(String.format("%.2f%% (%s)", r.changePct, absText));
@@ -430,6 +440,7 @@ public class FlippingMastermindsPanel extends PluginPanel
         // Volume line – shown only when config toggle is on
         if (showVolume && r.volume > 0)
         {
+            // CHANGED: formatNumber now takes long
             JLabel volLabel = new JLabel("Vol: " + formatNumber(r.volume));
             volLabel.setForeground(new Color(140, 140, 180));
             volLabel.setFont(volLabel.getFont().deriveFont(10f));
@@ -439,6 +450,7 @@ public class FlippingMastermindsPanel extends PluginPanel
         // Historical → current price line – shown only when config toggle is on
         if (showPrices)
         {
+            // CHANGED: formatGp now takes long
             JLabel priceLabel = new JLabel(formatGp(r.snapPrice) + " → " + formatGp(r.curPrice));
             priceLabel.setForeground(new Color(180, 160, 100));
             priceLabel.setFont(priceLabel.getFont().deriveFont(10f));
@@ -643,18 +655,20 @@ public class FlippingMastermindsPanel extends PluginPanel
 
     // ── Formatting ────────────────────────────────────────────────────────────
 
-    private static String formatGp(int gp)
+    // CHANGED: parameter type int → long so values > Integer.MAX_VALUE display correctly
+    private static String formatGp(long gp)
     {
-        double abs = Math.abs(gp);
+        double abs = Math.abs((double) gp);
         if (abs >= 1_000_000_000) return String.format("%.1fB", gp / 1_000_000_000.0);
         if (abs >= 1_000_000)     return String.format("%.1fM", gp / 1_000_000.0);
         if (abs >= 1_000)         return String.format("%.1fK", gp / 1_000.0);
         return gp + " gp";
     }
 
-    private static String formatNumber(int num)
+    // CHANGED: parameter type int → long
+    private static String formatNumber(long num)
     {
-        double abs = Math.abs(num);
+        double abs = Math.abs((double) num);
         if (abs >= 1_000_000_000) return String.format("%.1fB", num / 1_000_000_000.0);
         if (abs >= 1_000_000)     return String.format("%.1fM", num / 1_000_000.0);
         if (abs >= 1_000)         return String.format("%.1fK", num / 1_000.0);
@@ -663,9 +677,10 @@ public class FlippingMastermindsPanel extends PluginPanel
 
     // ── Utilities ─────────────────────────────────────────────────────────────
 
-    private static int safeParseInt(String s, int fallback)
+    // CHANGED: safeParseInt replaced with safeParseLong for price/volume filter fields
+    private static long safeParseLong(String s, long fallback)
     {
-        try { return Integer.parseInt(s.trim()); }
+        try { return Long.parseLong(s.trim()); }
         catch (Exception e) { return fallback; }
     }
 
@@ -715,6 +730,7 @@ public class FlippingMastermindsPanel extends PluginPanel
 
     // ── Row data class ────────────────────────────────────────────────────────
 
+    // CHANGED: changeAbs, volume, snapPrice, curPrice all int → long
     private static class Row
     {
         final int    id;
@@ -722,13 +738,13 @@ public class FlippingMastermindsPanel extends PluginPanel
         final String displayName;
         final String iconUrl;
         final double changePct;
-        final int    changeAbs;
-        final int    volume;
-        final int    snapPrice;
-        final int    curPrice;
+        final long   changeAbs;
+        final long   volume;
+        final long   snapPrice;
+        final long   curPrice;
 
         Row(int id, String fullName, String displayName, String iconUrl,
-            double changePct, int changeAbs, int volume, int snapPrice, int curPrice)
+            double changePct, long changeAbs, long volume, long snapPrice, long curPrice)
         {
             this.id          = id;
             this.fullName    = fullName;
