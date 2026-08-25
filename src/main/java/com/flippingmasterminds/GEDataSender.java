@@ -82,13 +82,6 @@ public class GEDataSender
 
     public void shutdown() {
         running = false;
-        okHttpClient.dispatcher().executorService().shutdown();
-        okHttpClient.connectionPool().evictAll();
-        if (okHttpClient.cache() != null) {
-            try {
-                okHttpClient.cache().close();
-            } catch (IOException ignored) {}
-        }
     }
 
 }
