@@ -19,10 +19,6 @@ public class BuyLimitTracker
         load();
     }
 
-    /**
-     * Record a buy of a specific quantity for an item.
-     * Starts a new 4-hour window if the previous one has expired.
-     */
     public synchronized void recordBuy(int itemId, int quantity)
     {
         BuyRecord record = records.get(itemId);
@@ -40,10 +36,6 @@ public class BuyLimitTracker
         save();
     }
 
-    /**
-     * Returns the timestamp (ms) of the first buy in the current 4-hour window.
-     * Returns 0 if none exists.
-     */
     public synchronized Long getBuyTimestamp(int itemId)
     {
         BuyRecord record = records.get(itemId);
@@ -54,9 +46,6 @@ public class BuyLimitTracker
         return 0L;
     }
 
-    /**
-     * Returns total quantity bought in current active window.
-     */
     public synchronized int getQuantityBoughtInWindow(int itemId)
     {
         BuyRecord record = records.get(itemId);
@@ -67,15 +56,10 @@ public class BuyLimitTracker
         return 0;
     }
 
-    /**
-     * Returns a map of all non-expired tracked items and their buy data.
-     * Automatically removes expired records to prevent memory leaks.
-     */
     public synchronized Map<Integer, Map<String, Object>> getAllTracked()
     {
         Map<Integer, Map<String, Object>> trackedData = new HashMap<>();
 
-        // Use an iterator to safely remove elements while looping
         Iterator<Map.Entry<Integer, BuyRecord>> iterator = records.entrySet().iterator();
         boolean removedAny = false;
 
@@ -86,7 +70,6 @@ public class BuyLimitTracker
 
             if (record.isExpired())
             {
-                // Remove the expired entry from the map to free memory
                 iterator.remove();
                 removedAny = true;
             }
@@ -107,27 +90,48 @@ public class BuyLimitTracker
         return trackedData;
     }
 
-    /**
-     * Load records from config if you want persistence between sessions.
-     * For now, this is a no-op placeholder.
-     */
+    private static final String CONFIG_GROUP = "flippingmasterminds";
+    private static final String CONFIG_KEY   = "buyLimitRecords";
+
     private void load()
     {
-        // Placeholder for future persistence logic
+        String raw = configManager.getConfiguration(CONFIG_GROUP, CONFIG_KEY);
+        if (raw == null || raw.isEmpty()) return;
+
+        for (String entry : raw.split(";"))
+        {
+            String[] parts = entry.split(",");
+            if (parts.length != 3) continue;
+            try
+            {
+                int  itemId    = Integer.parseInt(parts[0]);
+                long timestamp = Long.parseLong(parts[1]);
+                int  qty       = Integer.parseInt(parts[2]);
+                BuyRecord record = new BuyRecord(timestamp, qty);
+                if (!record.isExpired())
+                {
+                    records.put(itemId, record);
+                }
+            }
+            catch (NumberFormatException ignored) {}
+        }
     }
 
-    /**
-     * Save records to config for persistence.
-     * For now, this is a no-op placeholder.
-     */
     private void save()
     {
-        // Placeholder for future persistence logic
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<Integer, BuyRecord> entry : records.entrySet())
+        {
+            BuyRecord r = entry.getValue();
+            if (r.isExpired()) continue;
+            if (sb.length() > 0) sb.append(';');
+            sb.append(entry.getKey()).append(',')
+              .append(r.getFirstBuyTimestamp()).append(',')
+              .append(r.getQuantityBought());
+        }
+        configManager.setConfiguration(CONFIG_GROUP, CONFIG_KEY, sb.toString());
     }
 
-    // =========================
-    // Inner BuyRecord Class
-    // =========================
     private static class BuyRecord
     {
         private final long firstBuyTimestamp;

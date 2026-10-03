@@ -1,15 +1,14 @@
 package com.flippingmasterminds;
 
 import com.google.gson.Gson;
-import com.google.gson.JsonObject;
 import com.google.inject.Provides;
 import lombok.extern.slf4j.Slf4j;
-import net.runelite.api.Client;
-import net.runelite.api.GameState;
-import net.runelite.api.GrandExchangeOffer;
-import net.runelite.api.GrandExchangeOfferState;
+import net.runelite.api.*;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GrandExchangeOfferChanged;
+import net.runelite.api.events.ScriptCallbackEvent;
+import net.runelite.api.widgets.Widget;
+import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
@@ -17,17 +16,17 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ImageUtil;
-import okhttp3.*;
+import net.runelite.client.util.QuantityFormatter;
+import okhttp3.OkHttpClient;
 
 import javax.inject.Inject;
 import javax.swing.*;
 import java.awt.image.BufferedImage;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 @Slf4j
 @PluginDescriptor(
@@ -38,37 +37,50 @@ import java.util.concurrent.*;
 public class FlippingMastermindsPlugin extends Plugin
 {
 	@Inject private Client client;
+	@Inject private ClientThread clientThread;
 	@Inject private FlippingMastermindsConfig config;
 	@Inject private ClientToolbar clientToolbar;
 	@Inject private ConfigManager configManager;
 	@Inject private BuyLimitTracker buyLimitTracker;
+	@Inject private PriceAlertTracker priceAlertTracker;
+	@Inject private OverlayManager overlayManager;
+	@Inject private GrandExchangeOverlay geOverlay;
 
 	private NavigationButton navButton;
 	private FlippingMastermindsPanel panel;
 
-	private boolean loggedIn = false;
+	private volatile boolean loggedIn = false;
 
 	@Inject private Gson gson;
 	@Inject private OkHttpClient okHttpClient;
-	private static final MediaType JSON_MEDIA_TYPE = MediaType.get("application/json; charset=utf-8");
-	private static final String TARGET_URL = "http://api.flippingmasterminds.net/ge";
+	private GEDataSender sender;
+	private PriceDataFetcher fetcher;
 
-	private long loginTime = 0;
+	private volatile long loginTime = 0;
 	/** Short window after login to let the client fully settle before we fire events. */
 	private static final long LOGIN_IGNORE_WINDOW_MS = 3_000;
+	/** Delay after login before sending queued chat alerts so the player is fully loaded in. */
+	private static final long CHAT_READY_DELAY_MS = 15_000;
+	private final List<String> pendingChatMessages = new CopyOnWriteArrayList<>();
 
-	private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+	private ScheduledExecutorService scheduler;
 	private ScheduledFuture<?> pendingSend = null;
-	private final long DEBOUNCE_DELAY_MS = 200;
+	private static final long DEBOUNCE_DELAY_MS = 200;
+	private static final long LOGIN_JITTER_MAX_MS = 5_000;
 	private String lastReason = "Slot updated";
-	private String lastSentPayload = null;
 
 	private final OfferStateCache[] lastOfferStates = new OfferStateCache[8];
 
+	private ScheduledFuture<?> autoRefreshFuture = null;
+	private ScheduledFuture<?> buyLimitCheckFuture = null;
+	private Set<Integer> knownBuyLimitItems = new HashSet<>();
+
 	private ExecutorService executor;
 
+	private static final int GE_EXAMINE_GROUP = 465;
+	private static final int GE_EXAMINE_DESC_CHILD = 27;
+
 	// ── Price / volume data held in memory ────────────────────────────────────
-	// CHANGED: Integer → Long to support prices > 2,147,483,647 gp (v2 API requirement)
 	private Map<Integer, Long> baselinePrices = new HashMap<>();
 	private Map<Integer, Long> dayPrices      = new HashMap<>();
 	private Map<Integer, Long> weekPrices     = new HashMap<>();
@@ -80,9 +92,11 @@ public class FlippingMastermindsPlugin extends Plugin
 	private Map<Integer, Long> monthVolume = new HashMap<>();
 	private Map<Integer, Long> yearVolume  = new HashMap<>();
 
-	private Map<Integer, ItemMeta> itemMeta = new HashMap<>();
+	private volatile Map<Integer, Long> latestHigh = new HashMap<>();
+	private volatile Map<Integer, Long> latestLow  = new HashMap<>();
 
-	private static final String USER_AGENT_HEADER = "Call from FMM Plugin, code owner discord: Lindor.";
+	private volatile Map<Integer, ItemMeta> itemMeta = new HashMap<>();
+
 
 	// ─────────────────────────────────────────────────────────────────────────
 	@Override
@@ -90,13 +104,29 @@ public class FlippingMastermindsPlugin extends Plugin
 	{
 		log.info("Flipping Masterminds plugin started");
 
+		scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+			Thread t = new Thread(r, "fmm-scheduler");
+			t.setDaemon(true);
+			return t;
+		});
+
+		sender = new GEDataSender(okHttpClient, scheduler);
+		fetcher = new PriceDataFetcher(okHttpClient, gson);
+
 		panel = new FlippingMastermindsPanel();
 
 		// Wire the manual-refresh button back to this plugin
-		panel.setOnRefreshRequested(() -> executor.submit(this::fetchAllData));
+		panel.setOnRefreshRequested(() -> {
+			ExecutorService ex = executor;
+			if (ex != null) ex.submit(this::fetchAllData);
+		});
 
 		// Apply persisted toggle states from config
 		panel.applyConfig(config.showVolume(), config.showPrices());
+
+		// Wire trackers to tabs
+		panel.getAlertPanel().setTracker(priceAlertTracker);
+		panel.getBuyLimitPanel().setBuyLimitTracker(buyLimitTracker);
 
 		BufferedImage icon = null;
 		try
@@ -116,10 +146,22 @@ public class FlippingMastermindsPlugin extends Plugin
 				.build();
 
 		clientToolbar.addNavigation(navButton);
+		overlayManager.add(geOverlay);
 		loggedIn = false;
 
-		executor = Executors.newSingleThreadExecutor();
+		knownBuyLimitItems = new HashSet<>(buyLimitTracker.getAllTracked().keySet());
+
+		executor = Executors.newSingleThreadExecutor(r -> {
+			Thread t = new Thread(r, "fmm-executor");
+			t.setDaemon(true);
+			return t;
+		});
 		executor.submit(this::fetchAllData);
+
+		scheduleAutoRefresh();
+
+		buyLimitCheckFuture = scheduler.scheduleAtFixedRate(
+				this::checkBuyLimitResets, 30, 30, TimeUnit.SECONDS);
 	}
 
 	@Override
@@ -127,14 +169,35 @@ public class FlippingMastermindsPlugin extends Plugin
 	{
 		log.info("Flipping Masterminds plugin stopped");
 		loggedIn = false;
+		pendingChatMessages.clear();
 
+		overlayManager.remove(geOverlay);
 		if (navButton != null) clientToolbar.removeNavigation(navButton);
-		if (panel    != null) panel.dispose();
+		if (panel    != null)
+		{
+			panel.getAlertPanel().stopTimer();
+			panel.getBuyLimitPanel().stopTimer();
+			panel.dispose();
+		}
+
+		if (autoRefreshFuture != null && !autoRefreshFuture.isDone()) autoRefreshFuture.cancel(false);
+		if (buyLimitCheckFuture != null && !buyLimitCheckFuture.isDone()) buyLimitCheckFuture.cancel(false);
+		autoRefreshFuture = null;
+		buyLimitCheckFuture = null;
+		knownBuyLimitItems.clear();
 
 		if (executor != null) executor.shutdownNow();
+		executor = null;
+
+		if (sender != null) sender.shutdown();
+		sender = null;
 
 		if (pendingSend != null && !pendingSend.isDone()) pendingSend.cancel(false);
-		scheduler.shutdownNow();
+		pendingSend = null;
+		if (scheduler != null) scheduler.shutdownNow();
+		scheduler = null;
+
+		Arrays.fill(lastOfferStates, null);
 	}
 
 	// ── Game-state events ─────────────────────────────────────────────────────
@@ -148,19 +211,26 @@ public class FlippingMastermindsPlugin extends Plugin
 			loginTime = System.currentTimeMillis();
 			log.info("Account logged in – GE scanning enabled (cooldown started)");
 
-			// Send an immediate GE snapshot on login (if token is set)
+			// Send a GE snapshot on login (if token is set), with jitter to spread login storms
 			if (!config.apiToken().isEmpty())
 			{
-				// Schedule just after the ignore window so the client is ready
+				long loginJitter = (long) (Math.random() * LOGIN_JITTER_MAX_MS);
 				scheduler.schedule(
 						() -> sendOffersIfChanged("Login snapshot"),
-						LOGIN_IGNORE_WINDOW_MS,
+						LOGIN_IGNORE_WINDOW_MS + loginJitter,
 						TimeUnit.MILLISECONDS
 				);
 			}
 			else
 			{
 				log.debug("No API token configured – skipping login snapshot");
+			}
+
+			// Flush any queued alert messages after a delay so chat is ready
+			if (!pendingChatMessages.isEmpty())
+			{
+				scheduler.schedule(this::flushPendingChatMessages,
+						CHAT_READY_DELAY_MS, TimeUnit.MILLISECONDS);
 			}
 		}
 		else if (event.getGameState() == GameState.LOGIN_SCREEN
@@ -173,10 +243,6 @@ public class FlippingMastermindsPlugin extends Plugin
 
 	// ── Config change events ──────────────────────────────────────────────────
 
-	/**
-	 * Fired whenever any config value changes in the RuneLite settings panel.
-	 * We only care about our own group's display toggles; other keys are ignored.
-	 */
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
@@ -188,6 +254,38 @@ public class FlippingMastermindsPlugin extends Plugin
 			SwingUtilities.invokeLater(() ->
 					panel.applyConfig(config.showVolume(), config.showPrices()));
 		}
+		else if ("autoRefresh".equals(key) || "autoRefreshMinutes".equals(key))
+		{
+			scheduleAutoRefresh();
+		}
+		else if ("apiToken".equals(key))
+		{
+			sender.onTokenChanged(config.apiToken());
+		}
+	}
+
+	private void scheduleAutoRefresh()
+	{
+		if (autoRefreshFuture != null && !autoRefreshFuture.isDone())
+		{
+			autoRefreshFuture.cancel(false);
+			autoRefreshFuture = null;
+		}
+
+		if (!config.autoRefresh()) return;
+
+		long intervalMinutes = Math.max(2, config.autoRefreshMinutes());
+		log.info("Auto-refresh scheduled every {} minutes", intervalMinutes);
+
+		autoRefreshFuture = scheduler.scheduleAtFixedRate(
+				() -> {
+					ExecutorService ex = executor;
+					if (ex != null) ex.submit(this::fetchAllData);
+				},
+				intervalMinutes,
+				intervalMinutes,
+				TimeUnit.MINUTES
+		);
 	}
 
 	// ── GE offer events ───────────────────────────────────────────────────────
@@ -239,122 +337,130 @@ public class FlippingMastermindsPlugin extends Plugin
 				() -> sendOffersIfChanged(lastReason), DEBOUNCE_DELAY_MS, TimeUnit.MILLISECONDS);
 	}
 
+	// ── GE examine text enhancement ──────────────────────────────────────────
+
+	@Subscribe
+	public void onScriptCallbackEvent(ScriptCallbackEvent event)
+	{
+		if (!config.geLatestPrices()) return;
+
+		String name = event.getEventName();
+		if (!"geBuyExamineText".equals(name) && !"geSellExamineText".equals(name))
+			return;
+
+		int itemId = client.getVarpValue(VarPlayer.CURRENT_GE_ITEM);
+		if (itemId <= 0) return;
+
+		Long inb = latestHigh.get(itemId);
+		Long ins = latestLow.get(itemId);
+		if (inb == null && ins == null) return;
+
+		StringBuilder sb = new StringBuilder("Latest Wiki");
+		if (inb != null) sb.append(" INB: ").append(QuantityFormatter.formatNumber(inb));
+		if (inb != null && ins != null) sb.append(" /");
+		if (ins != null) sb.append(" INS: ").append(QuantityFormatter.formatNumber(ins));
+		String wikiLine = sb.toString();
+
+		clientThread.invokeLater(() ->
+		{
+			Widget descWidget = client.getWidget(GE_EXAMINE_GROUP, GE_EXAMINE_DESC_CHILD);
+			if (descWidget == null) return;
+
+			String text = descWidget.getText();
+			if (text != null && !text.contains("Latest Wiki"))
+			{
+				descWidget.setText(text + "<br>" + wikiLine);
+			}
+		});
+	}
+
 	// ── Sending GE data ───────────────────────────────────────────────────────
 
 	private void sendOffersIfChanged(String reason)
 	{
-		if (client == null
-				|| client.getGrandExchangeOffers() == null
-				|| client.getLocalPlayer()        == null)
+		clientThread.invokeLater(() ->
 		{
-			log.debug("sendOffersIfChanged: client not ready, skipping");
-			return;
-		}
-
-		GrandExchangeOffer[]          offers    = client.getGrandExchangeOffers();
-		List<Map<String, Object>>     offerList = new ArrayList<>();
-
-		for (int i = 0; i < offers.length; i++)
-		{
-			GrandExchangeOffer    offer    = offers[i];
-			Map<String, Object>   slotData = new HashMap<>();
-			slotData.put("slot", i);
-
-			if (offer == null || offer.getState() == GrandExchangeOfferState.EMPTY)
+			if (client == null
+					|| client.getGrandExchangeOffers() == null
+					|| client.getLocalPlayer()        == null)
 			{
-				slotData.put("state", "EMPTY");
-			}
-			else
-			{
-				slotData.put("state",          offer.getState().toString());
-				slotData.put("itemId",         offer.getItemId());
-				slotData.put("quantitySold",   offer.getQuantitySold());
-				slotData.put("totalQuantity",  offer.getTotalQuantity());
-				slotData.put("price",          offer.getPrice());
-			}
-			offerList.add(slotData);
-		}
-
-		List<Map<String, Object>>          buyLimitList = new ArrayList<>();
-		Map<Integer, Map<String, Object>>  tracked      = buyLimitTracker.getAllTracked();
-
-		for (Map.Entry<Integer, Map<String, Object>> entry : tracked.entrySet())
-		{
-			Map<String, Object> record = new HashMap<>();
-			record.put("itemId",            entry.getKey());
-			record.put("quantityBought",    entry.getValue().get("quantityBought"));
-			record.put("firstBuyTimestamp", entry.getValue().get("firstBuyTimestamp"));
-			buyLimitList.add(record);
-		}
-
-		String playerName  = client.getLocalPlayer().getName();
-		long   accountHash = client.getAccountHash();
-
-		Map<String, Object> payloadMap = new HashMap<>();
-		payloadMap.put("reason",      reason);
-		payloadMap.put("playerName",  playerName);
-		payloadMap.put("accountHash", accountHash);
-		payloadMap.put("offers",      offerList);
-		payloadMap.put("buyLimits",   buyLimitList);
-
-		String jsonPayload = gson.toJson(payloadMap);
-		if (jsonPayload.equals(lastSentPayload)) return;
-		lastSentPayload = jsonPayload;
-
-		RequestBody body    = RequestBody.create(JSON_MEDIA_TYPE, jsonPayload);
-		Request     request = new Request.Builder()
-				.url(TARGET_URL)
-				.post(body)
-				.addHeader("Authorization", "Bearer " + config.apiToken())
-				.build();
-
-		okHttpClient.newCall(request).enqueue(new Callback()
-		{
-			@Override
-			public void onFailure(Call call, IOException e)
-			{
-				log.error("❌ Failed to send GE data", e);
+				log.debug("sendOffersIfChanged: client not ready, skipping");
+				return;
 			}
 
-			@Override
-			public void onResponse(Call call, Response response) throws IOException
+			GrandExchangeOffer[]          offers    = client.getGrandExchangeOffers();
+			List<Map<String, Object>>     offerList = new ArrayList<>();
+
+			for (int i = 0; i < offers.length; i++)
 			{
-				int    code = response.code();
-				String resp = response.body() != null ? response.body().string() : "";
-				response.close();
-				log.info("✅ GE data sent ({}) for {} | Response {}: {}", reason, playerName, code, resp);
+				GrandExchangeOffer    offer    = offers[i];
+				Map<String, Object>   slotData = new HashMap<>();
+				slotData.put("slot", i);
+
+				if (offer == null || offer.getState() == GrandExchangeOfferState.EMPTY)
+				{
+					slotData.put("state", "EMPTY");
+				}
+				else
+				{
+					slotData.put("state",          offer.getState().toString());
+					slotData.put("itemId",         offer.getItemId());
+					slotData.put("quantitySold",   offer.getQuantitySold());
+					slotData.put("totalQuantity",  offer.getTotalQuantity());
+					slotData.put("price",          offer.getPrice());
+				}
+				offerList.add(slotData);
 			}
+
+			List<Map<String, Object>>          buyLimitList = new ArrayList<>();
+			Map<Integer, Map<String, Object>>  tracked      = buyLimitTracker.getAllTracked();
+
+			for (Map.Entry<Integer, Map<String, Object>> entry : tracked.entrySet())
+			{
+				Map<String, Object> record = new HashMap<>();
+				record.put("itemId",            entry.getKey());
+				record.put("quantityBought",    entry.getValue().get("quantityBought"));
+				record.put("firstBuyTimestamp", entry.getValue().get("firstBuyTimestamp"));
+				buyLimitList.add(record);
+			}
+
+			String playerName  = client.getLocalPlayer().getName();
+			long   accountHash = client.getAccountHash();
+
+			Map<String, Object> payloadMap = new HashMap<>();
+			payloadMap.put("reason",      reason);
+			payloadMap.put("playerName",  playerName);
+			payloadMap.put("accountHash", accountHash);
+			payloadMap.put("offers",      offerList);
+			payloadMap.put("buyLimits",   buyLimitList);
+
+			GEDataSender s = sender;
+			if (s == null) return;
+			String jsonPayload = gson.toJson(payloadMap);
+			s.submit(jsonPayload, config.apiToken());
 		});
 	}
 
 	// ── Price / volume fetching ───────────────────────────────────────────────
 
-	/** Fetches all price and volume data then pushes it to the panel. */
 	void fetchAllData()
 	{
 		try
 		{
-			// CHANGED: /v1/osrs/latest → /v2/osrs/latest
-			baselinePrices = fetchLatestPrices("https://prices.runescape.wiki/api/v2/osrs/latest");
+			PriceDataFetcher.FetchResult result = fetcher.fetchAll();
 
-			long now = Instant.now().getEpochSecond();
-
-			PriceAndVolume day1h   = fetchPricesAndVolume(makeUrl1h(now, 86400));
-			PriceAndVolume week1h  = fetchPricesAndVolume(makeUrl1h(now, 604800));
-			PriceAndVolume month24 = fetchPricesAndVolume(makeUrl24h(now, 2629743));
-			PriceAndVolume year24  = fetchPricesAndVolume(makeUrl24h(now, 31556926));
-
-			dayPrices   = day1h.prices;
-			weekPrices  = week1h.prices;
-			monthPrices = month24.prices;
-			yearPrices  = year24.prices;
-
-			dayVolume   = day1h.volume;
-			weekVolume  = week1h.volume;
-			monthVolume = month24.volume;
-			yearVolume  = year24.volume;
-
-			itemMeta = fetchItemMeta("https://chisel.weirdgloop.org/gazproj/gazbot/os_dump.json");
+			latestHigh     = result.latest.high;
+			latestLow      = result.latest.low;
+			baselinePrices = result.latest.baseline;
+			dayPrices      = result.day.prices;
+			weekPrices     = result.week.prices;
+			monthPrices    = result.month.prices;
+			yearPrices     = result.year.prices;
+			dayVolume      = result.day.volume;
+			weekVolume     = result.week.volume;
+			monthVolume    = result.month.volume;
+			yearVolume     = result.year.volume;
+			itemMeta       = result.itemMeta;
 
 			SwingUtilities.invokeLater(() -> panel.updateMovers(
 					baselinePrices,
@@ -362,186 +468,144 @@ public class FlippingMastermindsPlugin extends Plugin
 					itemMeta,
 					dayVolume, weekVolume, monthVolume, yearVolume
 			));
+
+			checkPriceAlerts(result.latest.baseline);
 		}
 		catch (Exception e)
 		{
-			log.error("❌ Failed to fetch price data", e);
-			// Re-enable the refresh button even on failure
+			log.error("Failed to fetch price data", e);
 			SwingUtilities.invokeLater(() -> {
-				panel.updateMovers(
-						baselinePrices,
-						dayPrices, weekPrices, monthPrices, yearPrices,
-						itemMeta,
-						dayVolume, weekVolume, monthVolume, yearVolume
-				);
+				panel.refreshButtonReset();
 			});
 		}
 	}
 
-	// ── URL helpers ───────────────────────────────────────────────────────────
+	// ── Price alert checking ─────────────────────────────────────────────────
 
-	private String makeUrl1h(long now, long offset)
+	private void checkPriceAlerts(Map<Integer, Long> prices)
 	{
-		long ts = now - offset;
-		ts -= ts % 3600;
-		return "https://prices.runescape.wiki/api/v2/osrs/1h?timestamp=" + ts;
-	}
+		PriceAlertTracker.CheckResult result = priceAlertTracker.checkPrices(prices);
 
-	private String makeUrl24h(long now, long offset)
-	{
-		long ts = now - offset;
-		ts -= ts % 86400;
-		return "https://prices.runescape.wiki/api/v2/osrs/24h?timestamp=" + ts;
-	}
+		boolean uiChanged = !result.newlyTriggered.isEmpty() || !result.newlyStale.isEmpty();
 
-	// ── HTTP fetchers ─────────────────────────────────────────────────────────
-
-	/**
-	 * Fetches a timestamped price endpoint and returns both mid-prices and trade volumes.
-	 * CHANGED: return type uses Long values to handle prices > Integer.MAX_VALUE.
-	 * CHANGED: avgHighPrice/avgLowPrice parsed as double (v2 allows up to 2 decimal places).
-	 */
-	private PriceAndVolume fetchPricesAndVolume(String urlStr) throws IOException
-	{
-		Request request = new Request.Builder()
-				.url(urlStr)
-				.header("User-Agent", USER_AGENT_HEADER)
-				.build();
-
-		try (Response response = okHttpClient.newCall(request).execute())
+		if (uiChanged)
 		{
-			if (!response.isSuccessful() || response.body() == null)
-				throw new IOException("Failed to fetch prices: " + response.code());
+			SwingUtilities.invokeLater(() -> {
+				panel.getAlertPanel().rebuildAlertList();
+				panel.notifyTab("alerts");
+			});
+		}
 
-			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
-			{
-				// CHANGED: Map value type Integer → Long
-				Map<Integer, Long> prices = new HashMap<>();
-				Map<Integer, Long> volume = new HashMap<>();
+		for (PriceAlertTracker.PriceAlert alert : result.newlyTriggered)
+		{
+			String dir = alert.direction == PriceAlertTracker.Direction.BELOW
+					? "fell to" : "rose to";
+			String msg = "[FMM] " + alert.itemName + " " + dir + " "
+					+ formatGpSimple(alert.triggeredPrice)
+					+ " (target: " + formatGpSimple(alert.targetPrice) + ")";
+			pendingChatMessages.add(msg);
+		}
 
-				var root = gson.fromJson(reader, JsonObject.class);
-				var data = root.getAsJsonObject("data");
+		for (PriceAlertTracker.PriceAlert alert : result.newlyStale)
+		{
+			String dir = alert.direction == PriceAlertTracker.Direction.BELOW
+					? "fall below" : "rise above";
+			String msg = "[FMM] Alert expired: " + alert.itemName
+					+ " never " + dir + " " + formatGpSimple(alert.targetPrice)
+					+ " within " + formatDurationSimple(alert.expiryMs) + ".";
+			pendingChatMessages.add(msg);
+		}
 
-				for (String key : data.keySet())
-				{
-					try
-					{
-						int id  = Integer.parseInt(key);
-						var obj = data.getAsJsonObject(key);
-
-						// CHANGED: getAsDouble() instead of getAsInt() — v2 allows decimals.
-						// Math.round() gives us the nearest long, safe for > 32-bit values.
-						if (obj.has("avgHighPrice") && obj.has("avgLowPrice")
-								&& !obj.get("avgHighPrice").isJsonNull()
-								&& !obj.get("avgLowPrice").isJsonNull())
-						{
-							double high = obj.get("avgHighPrice").getAsDouble();
-							double low  = obj.get("avgLowPrice").getAsDouble();
-							prices.put(id, Math.round((high + low) / 2.0));
-						}
-
-						// Volume – sum of highPriceVolume + lowPriceVolume
-						// CHANGED: accumulate into long to avoid int overflow on high-volume items
-						long vol = 0;
-						if (obj.has("highPriceVolume") && !obj.get("highPriceVolume").isJsonNull())
-							vol += obj.get("highPriceVolume").getAsLong();
-						if (obj.has("lowPriceVolume") && !obj.get("lowPriceVolume").isJsonNull())
-							vol += obj.get("lowPriceVolume").getAsLong();
-						if (vol > 0) volume.put(id, vol);
-					}
-					catch (Exception ignored) {}
-				}
-				return new PriceAndVolume(prices, volume);
-			}
+		if (!pendingChatMessages.isEmpty() && loggedIn
+				&& System.currentTimeMillis() - loginTime >= CHAT_READY_DELAY_MS)
+		{
+			flushPendingChatMessages();
 		}
 	}
 
-	/**
-	 * Fetches the /latest endpoint for current spot prices.
-	 * CHANGED: return type Long; getAsLong() used so values > Integer.MAX_VALUE are safe.
-	 */
-	private Map<Integer, Long> fetchLatestPrices(String urlStr) throws IOException
+	private void flushPendingChatMessages()
 	{
-		Request request = new Request.Builder()
-				.url(urlStr)
-				.header("User-Agent", USER_AGENT_HEADER)
-				.build();
+		if (pendingChatMessages.isEmpty() || !loggedIn) return;
 
-		try (Response response = okHttpClient.newCall(request).execute())
+		List<String> toSend = new ArrayList<>(pendingChatMessages);
+		pendingChatMessages.clear();
+
+		clientThread.invokeLater(() ->
 		{
-			if (!response.isSuccessful() || response.body() == null)
-				throw new IOException("Failed to fetch latest prices: " + response.code());
-
-			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
+			for (String msg : toSend)
 			{
-				// CHANGED: Map value type Integer → Long
-				Map<Integer, Long> map  = new HashMap<>();
-				var root = gson.fromJson(reader, JsonObject.class);
-				var data = root.getAsJsonObject("data");
-
-				for (String key : data.keySet())
-				{
-					try
-					{
-						int id  = Integer.parseInt(key);
-						var obj = data.getAsJsonObject(key);
-						if (obj.has("high") && obj.has("low")
-								&& !obj.get("high").isJsonNull()
-								&& !obj.get("low").isJsonNull())
-						{
-							// CHANGED: getAsLong() — latest prices are integers but can exceed int max
-							long high = obj.get("high").getAsLong();
-							long low  = obj.get("low").getAsLong();
-							map.put(id, (high + low) / 2);
-						}
-					}
-					catch (Exception ignored) {}
-				}
-				return map;
+				client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", msg, null);
 			}
+		});
+	}
+
+	// ── Buy limit reset detection ────────────────────────────────────────────
+
+	private void checkBuyLimitResets()
+	{
+		Map<Integer, Map<String, Object>> tracked = buyLimitTracker.getAllTracked();
+		Set<Integer> currentItems = tracked.keySet();
+
+		List<Integer> resetItems = new ArrayList<>();
+		for (int itemId : knownBuyLimitItems)
+		{
+			if (!currentItems.contains(itemId))
+			{
+				resetItems.add(itemId);
+			}
+		}
+
+		knownBuyLimitItems = new HashSet<>(currentItems);
+
+		if (resetItems.isEmpty()) return;
+
+		if (loggedIn && resetItems.size() >= 5)
+		{
+			pendingChatMessages.add("[FMM] " + resetItems.size()
+					+ " buy limits have reset — check the Buy Limits tab.");
+		}
+		else
+		{
+			for (int itemId : resetItems)
+			{
+				String itemName = "Item " + itemId;
+				if (itemMeta != null && itemMeta.containsKey(itemId))
+				{
+					itemName = itemMeta.get(itemId).name;
+				}
+				pendingChatMessages.add("[FMM] Buy limit reset: " + itemName
+						+ " — 4-hour window expired, you can buy again.");
+			}
+		}
+
+		SwingUtilities.invokeLater(() -> {
+			panel.notifyTab("buylimits");
+			panel.getBuyLimitPanel().rebuildList();
+		});
+
+		if (loggedIn && System.currentTimeMillis() - loginTime >= CHAT_READY_DELAY_MS)
+		{
+			flushPendingChatMessages();
 		}
 	}
 
-	private Map<Integer, ItemMeta> fetchItemMeta(String urlStr) throws IOException
+	private static String formatDurationSimple(long ms)
 	{
-		Request request = new Request.Builder()
-				.url(urlStr)
-				.header("User-Agent", USER_AGENT_HEADER)
-				.build();
+		long hours = ms / (60 * 60 * 1000L);
+		if (hours < 24) return hours + " hour" + (hours != 1 ? "s" : "");
+		long days = hours / 24;
+		if (days < 7)   return days + " day" + (days != 1 ? "s" : "");
+		long weeks = days / 7;
+		return weeks + " week" + (weeks != 1 ? "s" : "");
+	}
 
-		try (Response response = okHttpClient.newCall(request).execute())
-		{
-			if (!response.isSuccessful() || response.body() == null)
-				throw new IOException("Failed to fetch item meta: " + response.code());
-
-			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
-			{
-				Map<Integer, ItemMeta> map  = new HashMap<>();
-				var root = gson.fromJson(reader, JsonObject.class);
-
-				for (String key : root.keySet())
-				{
-					try
-					{
-						int    id   = Integer.parseInt(key);
-						var    obj  = root.getAsJsonObject(key);
-						String name = obj.has("name") ? obj.get("name").getAsString() : "Item " + id;
-						String icon = obj.has("icon") ? obj.get("icon").getAsString() : "";
-
-						String safeIcon = icon
-								.replace(" ", "_")
-								.replace("'", "%27")
-								.replace("(", "%28")
-								.replace(")", "%29");
-
-						String iconUrl = "https://oldschool.runescape.wiki/images/c/c0/" + safeIcon + "?7263b";
-						map.put(id, new ItemMeta(id, name, iconUrl));
-					}
-					catch (Exception ignored) {}
-				}
-				return map;
-			}
-		}
+	private static String formatGpSimple(long gp)
+	{
+		double abs = Math.abs((double) gp);
+		if (abs >= 1_000_000_000) return String.format("%.1fB gp", gp / 1_000_000_000.0);
+		if (abs >= 1_000_000)     return String.format("%.1fM gp", gp / 1_000_000.0);
+		if (abs >= 1_000)         return String.format("%.1fK gp", gp / 1_000.0);
+		return gp + " gp";
 	}
 
 	// ── Guice providers ───────────────────────────────────────────────────────
@@ -553,9 +617,27 @@ public class FlippingMastermindsPlugin extends Plugin
 	}
 
 	@Provides
+	PriceAlertTracker providePriceAlertTracker(ConfigManager configManager)
+	{
+		return new PriceAlertTracker(configManager);
+	}
+
+	@Provides
 	FlippingMastermindsConfig provideConfig(ConfigManager configManager)
 	{
 		return configManager.getConfig(FlippingMastermindsConfig.class);
+	}
+
+	// ── Accessors for GE overlay ─────────────────────────────────────────────
+
+	Map<Integer, Long> getLatestHigh()
+	{
+		return latestHigh;
+	}
+
+	Map<Integer, Long> getLatestLow()
+	{
+		return latestLow;
 	}
 
 	// ── Inner / static types ──────────────────────────────────────────────────
@@ -572,33 +654,4 @@ public class FlippingMastermindsPlugin extends Plugin
 		}
 	}
 
-	/**
-	 * Holds both prices and trade volumes returned from one API call.
-	 * CHANGED: Map value type Integer → Long throughout.
-	 */
-	private static class PriceAndVolume
-	{
-		final Map<Integer, Long> prices;
-		final Map<Integer, Long> volume;
-
-		PriceAndVolume(Map<Integer, Long> prices, Map<Integer, Long> volume)
-		{
-			this.prices = prices;
-			this.volume = volume;
-		}
-	}
-
-	public static class ItemMeta
-	{
-		public final int    id;
-		public final String name;
-		public final String iconUrl;
-
-		public ItemMeta(int id, String name, String iconUrl)
-		{
-			this.id      = id;
-			this.name    = name;
-			this.iconUrl = iconUrl;
-		}
-	}
 }

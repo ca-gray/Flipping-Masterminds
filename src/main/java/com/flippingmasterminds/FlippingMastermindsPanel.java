@@ -48,9 +48,8 @@ public class FlippingMastermindsPanel extends PluginPanel
     private int currentPage = 0;
 
     // ── Data ──────────────────────────────────────────────────────────────────
-    // CHANGED: Map value type Integer → Long to handle prices > Integer.MAX_VALUE
     private Map<Integer, Long> baseline, day, week, month, year;
-    private Map<Integer, FlippingMastermindsPlugin.ItemMeta> meta;
+    private Map<Integer, ItemMeta> meta;
     private Map<Integer, Long> dayVolume    = Collections.emptyMap();
     private Map<Integer, Long> weekVolume   = Collections.emptyMap();
     private Map<Integer, Long> monthVolume  = Collections.emptyMap();
@@ -62,20 +61,37 @@ public class FlippingMastermindsPanel extends PluginPanel
     private final ExecutorService imageLoader;
     private final ImageIcon placeholderIcon;
 
+    // ── Tab switching ────────────────────────────────────────────────────────
+    private JPanel tabBar;
+    private TabButton marketTabBtn;
+    private TabButton alertsTabBtn;
+    private TabButton buyLimitTabBtn;
+    private CardLayout cardLayout;
+    private JPanel cardPanel;
+    private PriceAlertPanel alertPanel;
+    private BuyLimitPanel buyLimitPanel;
+
     // ── Plugin callback ───────────────────────────────────────────────────────
     private Runnable onRefreshRequested;
+
+    // ── Tab state ────────────────────────────────────────────────────────────
+    private String activeTab = "market";
 
     // ── Constants ─────────────────────────────────────────────────────────────
     private static final int ITEMS_PER_PAGE = 20;
     private static final int ICON_SIZE      = 32;
+    private static final int TAB_ICON_SIZE  = 22;
     private static final int NAME_LIMIT     = 20;
     private static final int MAX_PAGES      = 10;
+    private static final int CARD_ARC       = 10;
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
 
-    // Hover/press colours for animated buttons
-    private static final Color BTN_HOVER_BG = new Color(60, 60, 60);
-    private static final Color BTN_PRESS_BG = new Color(90, 90, 90);
-    private static final int   BTN_ARC      = 6;
+    // ── UI colours ───────────────────────────────────────────────────────────
+    private static final Color BG_CARD       = new Color(30, 32, 42);
+    private static final Color BORDER_SUBTLE = new Color(44, 47, 58);
+    private static final Color BTN_HOVER_BG  = new Color(60, 60, 60);
+    private static final Color BTN_PRESS_BG  = new Color(90, 90, 90);
+    private static final int   BTN_ARC       = 6;
 
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -98,26 +114,127 @@ public class FlippingMastermindsPanel extends PluginPanel
         placeholderIcon = makePlaceholderIcon(ICON_SIZE, ICON_SIZE);
 
         setLayout(new BorderLayout());
-        add(createHeaderPanel(),     BorderLayout.NORTH);
-        add(createBodyPanel(),       BorderLayout.CENTER);
-        add(createPaginationPanel(), BorderLayout.SOUTH);
+
+        // Top strip: social links + tab bar, always visible
+        JPanel topStrip = new JPanel();
+        topStrip.setLayout(new BoxLayout(topStrip, BoxLayout.Y_AXIS));
+        topStrip.setOpaque(false);
+
+        JPanel socialBar = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 4));
+        socialBar.setOpaque(false);
+        socialBar.add(createIconHoverButton("/discord_logo.png",
+                "https://discord.gg/VnsS2PP4Vt", "Join our Discord!"));
+        socialBar.add(createIconHoverButton("/github_logo.png",
+                "https://github.com/ca-gray/Flipping-Masterminds", "View on GitHub!"));
+        socialBar.add(createIconHoverButton("/oswiki_logo.png",
+                "https://prices.runescape.wiki/osrs/", "View Wiki Prices!"));
+        topStrip.add(socialBar);
+
+        tabBar = new JPanel(new GridLayout(1, 3, 6, 0));
+        tabBar.setBorder(BorderFactory.createEmptyBorder(2, 8, 2, 8));
+        tabBar.setOpaque(false);
+        marketTabBtn   = new TabButton(loadTabIcon("/market_logo.png"),   "Market");
+        alertsTabBtn   = new TabButton(loadTabIcon("/tracking_logo.png"), "Alerts");
+        buyLimitTabBtn = new TabButton(loadTabIcon("/buylimit_logo.png"), "Buy Limits");
+        marketTabBtn.setTabActive(true);
+        marketTabBtn.addActionListener(e -> switchTab("market"));
+        alertsTabBtn.addActionListener(e -> switchTab("alerts"));
+        buyLimitTabBtn.addActionListener(e -> switchTab("buylimits"));
+        tabBar.add(marketTabBtn);
+        tabBar.add(alertsTabBtn);
+        tabBar.add(buyLimitTabBtn);
+        topStrip.add(tabBar);
+
+        add(topStrip, BorderLayout.NORTH);
+
+        // Market view
+        JPanel marketView = new JPanel(new BorderLayout());
+        marketView.add(createHeaderPanel(),     BorderLayout.NORTH);
+        marketView.add(createBodyPanel(),       BorderLayout.CENTER);
+        marketView.add(createPaginationPanel(), BorderLayout.SOUTH);
+
+        // Alerts view
+        alertPanel = new PriceAlertPanel(imageCache, loadingSet, imageLoader, placeholderIcon);
+
+        // Buy limits view
+        buyLimitPanel = new BuyLimitPanel(imageCache, loadingSet, imageLoader, placeholderIcon);
+
+        // Card layout to switch between them
+        cardLayout = new CardLayout();
+        cardPanel = new JPanel(cardLayout);
+        cardPanel.add(marketView, "market");
+        cardPanel.add(alertPanel, "alerts");
+        cardPanel.add(buyLimitPanel, "buylimits");
+
+        add(cardPanel, BorderLayout.CENTER);
 
         attachFilterListeners();
     }
 
+    private ImageIcon loadTabIcon(String resourcePath)
+    {
+        try
+        {
+            URL res = getClass().getResource(resourcePath);
+            if (res != null)
+            {
+                BufferedImage raw = ImageIO.read(res);
+                Image scaled = raw.getScaledInstance(TAB_ICON_SIZE, TAB_ICON_SIZE, Image.SCALE_SMOOTH);
+                return new ImageIcon(scaled);
+            }
+        }
+        catch (IOException ignored) {}
+        return null;
+    }
+
+    private void switchTab(String tab)
+    {
+        activeTab = tab;
+        cardLayout.show(cardPanel, tab);
+        marketTabBtn.setTabActive("market".equals(tab));
+        alertsTabBtn.setTabActive("alerts".equals(tab));
+        buyLimitTabBtn.setTabActive("buylimits".equals(tab));
+        if ("alerts".equals(tab)) alertsTabBtn.setNotification(false);
+        else if ("buylimits".equals(tab)) buyLimitTabBtn.setNotification(false);
+    }
+
+    public void notifyTab(String tab)
+    {
+        if ("alerts".equals(tab) && !"alerts".equals(activeTab))
+        {
+            alertsTabBtn.setNotification(true);
+        }
+        else if ("buylimits".equals(tab) && !"buylimits".equals(activeTab))
+        {
+            buyLimitTabBtn.setNotification(true);
+        }
+    }
+
+    public PriceAlertPanel getAlertPanel()
+    {
+        return alertPanel;
+    }
+
+    public BuyLimitPanel getBuyLimitPanel()
+    {
+        return buyLimitPanel;
+    }
+
     // ── Public API ────────────────────────────────────────────────────────────
 
-    /** Called by the plugin to wire the Refresh button. */
+    public void refreshButtonReset()
+    {
+        refreshButton.setEnabled(true);
+        refreshButton.setText("⟳ Refresh");
+        lastUpdatedLabel.setText("Fetch failed");
+        lastUpdatedLabel.setForeground(new Color(220, 50, 50));
+    }
+
     public void setOnRefreshRequested(Runnable callback)
     {
         this.onRefreshRequested = callback;
     }
 
-    /**
-     * Called once on startup and whenever the user changes the Show Volume or
-     * Show Prices config items in the RuneLite settings panel.
-     * Triggers a list rebuild if data is already loaded.
-     */
     public void applyConfig(boolean showVolume, boolean showPrices)
     {
         boolean changed = (this.showVolume != showVolume) || (this.showPrices != showPrices);
@@ -135,18 +252,6 @@ public class FlippingMastermindsPanel extends PluginPanel
     {
         JPanel headerPanel = new JPanel();
         headerPanel.setLayout(new BoxLayout(headerPanel, BoxLayout.Y_AXIS));
-
-        // Social icon buttons
-        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 5));
-        buttonPanel.setBorder(BorderFactory.createEmptyBorder(0, 0, 5, 0));
-
-        buttonPanel.add(createIconHoverButton("/discord_logo.png",
-                "https://discord.gg/VnsS2PP4Vt", "Join our Discord!"));
-        buttonPanel.add(createIconHoverButton("/github_logo.png",
-                "https://github.com/ca-gray/Flipping-Masterminds", "View on GitHub!"));
-        buttonPanel.add(createIconHoverButton("/oswiki_logo.png",
-                "https://prices.runescape.wiki/osrs/", "View Wiki Prices!"));
-        headerPanel.add(buttonPanel);
 
         // Filter grid
         JPanel filterPanel = new JPanel(new GridBagLayout());
@@ -189,11 +294,10 @@ public class FlippingMastermindsPanel extends PluginPanel
         filterPanel.add(minPriceField, fld);
 
         // Row 3 – Max Price
-        // CHANGED: default was Integer.MAX_VALUE (2147483647); raised to Long.MAX_VALUE
-        // so items priced above the old int ceiling aren't excluded by default
         lbl.gridy++; fld.gridy++;
         filterPanel.add(new JLabel("Max Price:"), lbl);
-        maxPriceField = new JTextField(String.valueOf(Long.MAX_VALUE));
+        maxPriceField = new JTextField();
+        maxPriceField.setToolTipText("Leave empty for no upper limit");
         filterPanel.add(maxPriceField, fld);
 
         // Row 4 – Min Volume
@@ -288,14 +392,13 @@ public class FlippingMastermindsPanel extends PluginPanel
 
     // ── Public data entry point ───────────────────────────────────────────────
 
-    // CHANGED: all Map<Integer, Integer> price/volume parameters → Map<Integer, Long>
     public void updateMovers(
             Map<Integer, Long> baseline,
             Map<Integer, Long> day,
             Map<Integer, Long> week,
             Map<Integer, Long> month,
             Map<Integer, Long> year,
-            Map<Integer, FlippingMastermindsPlugin.ItemMeta> meta,
+            Map<Integer, ItemMeta> meta,
             Map<Integer, Long> dayVolume,
             Map<Integer, Long> weekVolume,
             Map<Integer, Long> monthVolume,
@@ -315,6 +418,11 @@ public class FlippingMastermindsPanel extends PluginPanel
         refreshButton.setEnabled(true);
         refreshButton.setText("⟳ Refresh");
         lastUpdatedLabel.setText("Updated " + LocalTime.now().format(TIME_FMT));
+        lastUpdatedLabel.setForeground(Color.GRAY);
+
+        alertPanel.updateMeta(meta);
+        alertPanel.updatePrices(baseline);
+        buyLimitPanel.updateMeta(meta);
 
         rebuildResults();
     }
@@ -330,14 +438,12 @@ public class FlippingMastermindsPanel extends PluginPanel
     {
         String timeRange = safeSelected(timeRangeDropdown,   "Day");
         String perf      = safeSelected(performanceDropdown, "Top Performers");
-        // CHANGED: min/max price filters now parsed as long
         long   min       = safeParseLong(minPriceField.getText(),  1L);
         long   max       = safeParseLong(maxPriceField.getText(),  Long.MAX_VALUE);
         long   minVol    = safeParseLong(minVolumeField.getText(), 0L);
 
         if (min > max) return;
 
-        // CHANGED: snapshot and volumeMap are Map<Integer, Long>
         Map<Integer, Long> snapshot;
         Map<Integer, Long> volumeMap;
         switch (timeRange)
@@ -372,7 +478,7 @@ public class FlippingMastermindsPanel extends PluginPanel
             if (perf.equals("Top Performers")  && !(changePct > 0.0)) continue;
             if (perf.equals("Underperformers") && !(changePct < 0.0)) continue;
 
-            FlippingMastermindsPlugin.ItemMeta im = meta.get(id);
+            ItemMeta im = meta.get(id);
             if (im == null) continue;
 
             rows.add(new Row(id, im.name, truncateName(im.name), im.iconUrl,
@@ -409,9 +515,22 @@ public class FlippingMastermindsPanel extends PluginPanel
 
     private JPanel makeRowPanel(Row r)
     {
-        JPanel rowPanel = new JPanel(new BorderLayout(8, 4));
-        rowPanel.setBackground(new Color(34, 34, 34));
-        rowPanel.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
+        JPanel rowPanel = new JPanel(new BorderLayout(8, 4))
+        {
+            @Override
+            protected void paintComponent(Graphics g)
+            {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(BG_CARD);
+                g2.fillRoundRect(0, 0, getWidth(), getHeight(), CARD_ARC, CARD_ARC);
+                g2.setColor(BORDER_SUBTLE);
+                g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, CARD_ARC, CARD_ARC);
+                g2.dispose();
+            }
+        };
+        rowPanel.setOpaque(false);
+        rowPanel.setBorder(BorderFactory.createEmptyBorder(8, 10, 8, 10));
 
         // Item icon – name attribute lets refreshVisibleIcons find this label
         JLabel iconLabel = new JLabel();
@@ -430,7 +549,6 @@ public class FlippingMastermindsPanel extends PluginPanel
         nameLabel.setToolTipText(r.fullName);
         textPanel.add(nameLabel);
 
-        // CHANGED: formatGp now takes long
         String absText   = (r.changeAbs > 0 ? "+" : "") + formatGp(r.changeAbs);
         Color  changeClr = r.changeAbs >= 0 ? new Color(0, 192, 0) : new Color(220, 50, 50);
         JLabel changeLabel = new JLabel(String.format("%.2f%% (%s)", r.changePct, absText));
@@ -440,7 +558,6 @@ public class FlippingMastermindsPanel extends PluginPanel
         // Volume line – shown only when config toggle is on
         if (showVolume && r.volume > 0)
         {
-            // CHANGED: formatNumber now takes long
             JLabel volLabel = new JLabel("Vol: " + formatNumber(r.volume));
             volLabel.setForeground(new Color(140, 140, 180));
             volLabel.setFont(volLabel.getFont().deriveFont(10f));
@@ -450,7 +567,6 @@ public class FlippingMastermindsPanel extends PluginPanel
         // Historical → current price line – shown only when config toggle is on
         if (showPrices)
         {
-            // CHANGED: formatGp now takes long
             JLabel priceLabel = new JLabel(formatGp(r.snapPrice) + " → " + formatGp(r.curPrice));
             priceLabel.setForeground(new Color(180, 160, 100));
             priceLabel.setFont(priceLabel.getFont().deriveFont(10f));
@@ -489,6 +605,79 @@ public class FlippingMastermindsPanel extends PluginPanel
                 g2.dispose();
             }
             super.paintComponent(g);
+        }
+    }
+
+    static class TabButton extends JButton
+    {
+        private boolean tabActive = false;
+        private boolean notification = false;
+        private boolean hovered = false;
+
+        private static final Color ACTIVE_BG       = new Color(50, 54, 72);
+        private static final Color HOVER_BG        = new Color(42, 45, 58);
+        private static final Color INACTIVE_BG     = new Color(28, 30, 38);
+        private static final Color ACCENT           = new Color(90, 140, 220);
+        private static final Color NOTIF_DOT       = new Color(240, 160, 40);
+        private static final int TAB_ARC           = 10;
+
+        TabButton(ImageIcon icon, String tooltip)
+        {
+            if (icon != null) setIcon(icon);
+            setToolTipText(tooltip);
+            setFocusPainted(false);
+            setContentAreaFilled(false);
+            setBorderPainted(false);
+            setOpaque(false);
+            setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+            setPreferredSize(new Dimension(0, 36));
+
+            addMouseListener(new MouseAdapter()
+            {
+                @Override public void mouseEntered(MouseEvent e) { hovered = true;  repaint(); }
+                @Override public void mouseExited(MouseEvent e)  { hovered = false; repaint(); }
+            });
+        }
+
+        void setTabActive(boolean active) { this.tabActive = active; repaint(); }
+        void setNotification(boolean on)  { this.notification = on;  repaint(); }
+
+        @Override
+        protected void paintComponent(Graphics g)
+        {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+            int w = getWidth(), h = getHeight();
+
+            if (tabActive)
+                g2.setColor(ACTIVE_BG);
+            else if (hovered)
+                g2.setColor(HOVER_BG);
+            else
+                g2.setColor(INACTIVE_BG);
+
+            g2.fillRoundRect(0, 0, w, h, TAB_ARC, TAB_ARC);
+
+            if (tabActive)
+            {
+                g2.setColor(ACCENT);
+                int lineW = w / 2;
+                g2.fillRoundRect((w - lineW) / 2, h - 3, lineW, 3, 2, 2);
+            }
+
+            g2.dispose();
+            super.paintComponent(g);
+
+            if (notification && !tabActive)
+            {
+                Graphics2D g3 = (Graphics2D) g.create();
+                g3.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g3.setColor(NOTIF_DOT);
+                int dotSize = 8;
+                g3.fillOval(w - 14, 4, dotSize, dotSize);
+                g3.dispose();
+            }
         }
     }
 
@@ -556,29 +745,39 @@ public class FlippingMastermindsPanel extends PluginPanel
 
     // ── Image loading ─────────────────────────────────────────────────────────
 
-    private void scheduleImageLoad(int id, String rawIconUrl)
+    static void loadIconAsync(int itemId, String iconUrl, int size,
+                              ConcurrentMap<Integer, ImageIcon> cache,
+                              Set<Integer> loading,
+                              ExecutorService loader,
+                              Runnable onComplete)
     {
-        if (imageCache.containsKey(id) || loadingSet.contains(id)) return;
-        if (rawIconUrl == null || rawIconUrl.isEmpty())              return;
+        if (cache.containsKey(itemId) || loading.contains(itemId)) return;
+        if (iconUrl == null || iconUrl.isEmpty()) return;
 
-        loadingSet.add(id);
-        imageLoader.submit(() -> {
+        loading.add(itemId);
+        loader.submit(() -> {
             try
             {
-                String urlStr = rawIconUrl.startsWith("http")
-                        ? rawIconUrl : sanitizeIconUrl(rawIconUrl);
-                BufferedImage img = ImageIO.read(new URL(urlStr));
+                BufferedImage img = ImageIO.read(new URL(iconUrl));
                 if (img != null)
                 {
-                    Image scaled = img.getScaledInstance(ICON_SIZE, ICON_SIZE, Image.SCALE_SMOOTH);
-                    imageCache.put(id, new ImageIcon(scaled));
+                    Image scaled = img.getScaledInstance(size, size, Image.SCALE_SMOOTH);
+                    cache.put(itemId, new ImageIcon(scaled));
                 }
             }
-            catch (Exception ignored) { }
-            finally { loadingSet.remove(id); }
+            catch (Exception ignored) {}
+            finally { loading.remove(itemId); }
 
-            SwingUtilities.invokeLater(this::refreshVisibleIcons);
+            SwingUtilities.invokeLater(onComplete);
         });
+    }
+
+    private void scheduleImageLoad(int id, String rawIconUrl)
+    {
+        String urlStr = rawIconUrl != null && rawIconUrl.startsWith("http")
+                ? rawIconUrl : sanitizeIconUrl(rawIconUrl != null ? rawIconUrl : "");
+        loadIconAsync(id, urlStr, ICON_SIZE, imageCache, loadingSet, imageLoader,
+                this::refreshVisibleIcons);
     }
 
     private void refreshVisibleIcons()
@@ -655,8 +854,7 @@ public class FlippingMastermindsPanel extends PluginPanel
 
     // ── Formatting ────────────────────────────────────────────────────────────
 
-    // CHANGED: parameter type int → long so values > Integer.MAX_VALUE display correctly
-    private static String formatGp(long gp)
+    static String formatGp(long gp)
     {
         double abs = Math.abs((double) gp);
         if (abs >= 1_000_000_000) return String.format("%.1fB", gp / 1_000_000_000.0);
@@ -665,7 +863,6 @@ public class FlippingMastermindsPanel extends PluginPanel
         return gp + " gp";
     }
 
-    // CHANGED: parameter type int → long
     private static String formatNumber(long num)
     {
         double abs = Math.abs((double) num);
@@ -677,9 +874,9 @@ public class FlippingMastermindsPanel extends PluginPanel
 
     // ── Utilities ─────────────────────────────────────────────────────────────
 
-    // CHANGED: safeParseInt replaced with safeParseLong for price/volume filter fields
     private static long safeParseLong(String s, long fallback)
     {
+        if (s == null || s.trim().isEmpty()) return fallback;
         try { return Long.parseLong(s.trim()); }
         catch (Exception e) { return fallback; }
     }
@@ -713,7 +910,7 @@ public class FlippingMastermindsPanel extends PluginPanel
                 .replace("'", "%27")
                 .replace("(", "%28")
                 .replace(")", "%29");
-        return "https://oldschool.runescape.wiki/images/c/c0/" + safe + "?7263b";
+        return "https://oldschool.runescape.wiki/w/Special:FilePath/" + safe;
     }
 
     private static void addDocumentListener(JTextField field, Runnable onChange)
@@ -726,11 +923,13 @@ public class FlippingMastermindsPanel extends PluginPanel
         });
     }
 
-    public void dispose() { imageLoader.shutdownNow(); }
+    public void dispose()
+    {
+        imageLoader.shutdownNow();
+    }
 
     // ── Row data class ────────────────────────────────────────────────────────
 
-    // CHANGED: changeAbs, volume, snapPrice, curPrice all int → long
     private static class Row
     {
         final int    id;
