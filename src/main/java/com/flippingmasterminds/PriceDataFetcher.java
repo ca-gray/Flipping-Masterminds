@@ -1,6 +1,8 @@
 package com.flippingmasterminds;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.OkHttpClient;
@@ -9,6 +11,7 @@ import okhttp3.Response;
 
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
@@ -17,11 +20,22 @@ import java.util.Map;
 class PriceDataFetcher
 {
 	private static final String LATEST_URL = "https://prices.runescape.wiki/api/v2/osrs/latest";
-	private static final String ITEM_META_URL = "https://chisel.weirdgloop.org/gazproj/gazbot/os_dump.json";
-	private static final String USER_AGENT = "Call from FMM Plugin, code owner discord: Lindor.";
+	private static final String MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping";
+	private static final String LATEST_24H_URL = "https://prices.runescape.wiki/api/v2/osrs/24h";
+	private static final String USER_AGENT = "Flipping Masterminds RuneLite plugin - Discord: Lindor";
+
+	/** Historical snapshots only move hourly; item names rarely change. */
+	private static final long SNAPSHOT_TTL_MS = 60 * 60 * 1000L;
+	private static final long META_TTL_MS     = 24 * 60 * 60 * 1000L;
 
 	private final OkHttpClient httpClient;
 	private final Gson gson;
+
+	// Cached between refreshes; only touched from the single fetch thread.
+	private PriceAndVolume day, week, month, year;
+	private long snapshotsFetchedAt;
+	private Map<Integer, ItemMeta> meta;
+	private long metaFetchedAt;
 
 	PriceDataFetcher(OkHttpClient httpClient, Gson gson)
 	{
@@ -33,16 +47,31 @@ class PriceDataFetcher
 	{
 		LatestPriceResult latestResult = fetchLatestPrices(LATEST_URL);
 
-		long now = Instant.now().getEpochSecond();
+		long nowMs = System.currentTimeMillis();
+		if (day == null || nowMs - snapshotsFetchedAt >= SNAPSHOT_TTL_MS)
+		{
+			long now = Instant.now().getEpochSecond();
+			PriceAndVolume d = fetchPricesAndVolume(makeUrl1h(now, 86_400));
+			PriceAndVolume w = fetchPricesAndVolume(makeUrl1h(now, 604_800));
+			PriceAndVolume m = fetchPricesAndVolume(makeUrl24h(now, 2_629_743));
+			PriceAndVolume y = fetchPricesAndVolume(makeUrl24h(now, 31_556_926));
+			// The snapshots above only cover a single bucket at the start of each window,
+			// so every range uses the trailing 24h volume instead.
+			Map<Integer, Long> dailyVolume = fetchPricesAndVolume(LATEST_24H_URL).volume;
+			day   = new PriceAndVolume(d.prices, dailyVolume);
+			week  = new PriceAndVolume(w.prices, dailyVolume);
+			month = new PriceAndVolume(m.prices, dailyVolume);
+			year  = new PriceAndVolume(y.prices, dailyVolume);
+			snapshotsFetchedAt = nowMs;
+		}
 
-		PriceAndVolume day1h   = fetchPricesAndVolume(makeUrl1h(now, 86_400));
-		PriceAndVolume week1h  = fetchPricesAndVolume(makeUrl1h(now, 604_800));
-		PriceAndVolume month24 = fetchPricesAndVolume(makeUrl24h(now, 2_629_743));
-		PriceAndVolume year24  = fetchPricesAndVolume(makeUrl24h(now, 31_556_926));
+		if (meta == null || nowMs - metaFetchedAt >= META_TTL_MS)
+		{
+			meta = fetchItemMeta(MAPPING_URL);
+			metaFetchedAt = nowMs;
+		}
 
-		Map<Integer, ItemMeta> meta = fetchItemMeta(ITEM_META_URL);
-
-		return new FetchResult(latestResult, day1h, week1h, month24, year24, meta);
+		return new FetchResult(latestResult, day, week, month, year, meta);
 	}
 
 	LatestPriceResult fetchLatestPrices(String urlStr) throws IOException
@@ -59,7 +88,7 @@ class PriceDataFetcher
 				throw new IOException("Failed to fetch latest prices: " + response.code());
 			}
 
-			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
+			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream(), StandardCharsets.UTF_8))
 			{
 				Map<Integer, Long> map    = new HashMap<>();
 				Map<Integer, Long> high   = new HashMap<>();
@@ -109,7 +138,7 @@ class PriceDataFetcher
 				throw new IOException("Failed to fetch prices: " + response.code());
 			}
 
-			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
+			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream(), StandardCharsets.UTF_8))
 			{
 				Map<Integer, Long> prices = new HashMap<>();
 				Map<Integer, Long> volume = new HashMap<>();
@@ -167,37 +196,34 @@ class PriceDataFetcher
 				throw new IOException("Failed to fetch item meta: " + response.code());
 			}
 
-			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream()))
+			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream(), StandardCharsets.UTF_8))
 			{
-				Map<Integer, ItemMeta> map = new HashMap<>();
-				JsonObject root = gson.fromJson(reader, JsonObject.class);
-
-				for (String key : root.keySet())
-				{
-					try
-					{
-						int    id   = Integer.parseInt(key);
-						JsonObject obj  = root.getAsJsonObject(key);
-						String name = obj.has("name") ? obj.get("name").getAsString() : "Item " + id;
-						String icon = obj.has("icon") ? obj.get("icon").getAsString() : "";
-
-						String safeIcon = icon
-								.replace(" ", "_")
-								.replace("'", "%27")
-								.replace("(", "%28")
-								.replace(")", "%29");
-
-						String iconUrl = "https://oldschool.runescape.wiki/w/Special:FilePath/" + safeIcon;
-						map.put(id, new ItemMeta(id, name, iconUrl));
-					}
-					catch (Exception e)
-					{
-						log.debug("Skipping item {} in meta: {}", key, e.getMessage());
-					}
-				}
-				return map;
+				return parseMapping(gson.fromJson(reader, JsonArray.class));
 			}
 		}
+	}
+
+	/** Parse the wiki {@code /mapping} response: an array of {@code {id, name, ...}} objects. */
+	static Map<Integer, ItemMeta> parseMapping(JsonArray items)
+	{
+		Map<Integer, ItemMeta> map = new HashMap<>();
+		if (items == null) return map;
+		for (JsonElement el : items)
+		{
+			try
+			{
+				JsonObject obj = el.getAsJsonObject();
+				int id = obj.get("id").getAsInt();
+				String name = obj.has("name") && !obj.get("name").isJsonNull()
+						? obj.get("name").getAsString() : "Item " + id;
+				map.put(id, new ItemMeta(id, name));
+			}
+			catch (Exception e)
+			{
+				log.debug("Skipping item in mapping: {}", e.getMessage());
+			}
+		}
+		return map;
 	}
 
 	static String makeUrl1h(long now, long offset)

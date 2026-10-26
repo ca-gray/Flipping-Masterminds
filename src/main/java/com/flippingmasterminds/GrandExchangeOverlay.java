@@ -3,6 +3,8 @@ package com.flippingmasterminds;
 import net.runelite.api.Client;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
+import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayLayer;
@@ -14,12 +16,12 @@ import java.util.Map;
 
 public class GrandExchangeOverlay extends Overlay
 {
-	private static final int GE_GROUP_ID = 465;
-	private static final int GE_FIRST_SLOT_CHILD = 7;
-	private static final int GE_SETUP_CHILD = 26;
-	private static final int GE_SETUP_DESC_CHILD = 27;
-	private static final int GE_SETUP_CONFIRM_CHILD = 30;
-	private static final int CURRENT_GE_ITEM_VARP = 1151;
+	static final int[] SLOT_WIDGETS = {
+			InterfaceID.GeOffers.INDEX_0, InterfaceID.GeOffers.INDEX_1,
+			InterfaceID.GeOffers.INDEX_2, InterfaceID.GeOffers.INDEX_3,
+			InterfaceID.GeOffers.INDEX_4, InterfaceID.GeOffers.INDEX_5,
+			InterfaceID.GeOffers.INDEX_6, InterfaceID.GeOffers.INDEX_7,
+	};
 
 	private static final Color GREEN_FILL    = new Color(0, 180, 0, 20);
 	private static final Color GREEN_BORDER  = new Color(0, 180, 0, 60);
@@ -48,7 +50,7 @@ public class GrandExchangeOverlay extends Overlay
 	{
 		if (!config.geOverlay()) return null;
 
-		Widget geWindow = client.getWidget(GE_GROUP_ID, 0);
+		Widget geWindow = client.getWidget(InterfaceID.GeOffers.UNIVERSE);
 		if (geWindow == null || geWindow.isHidden()) return null;
 
 		Map<Integer, Long> highPrices = plugin.getLatestHigh();
@@ -58,7 +60,7 @@ public class GrandExchangeOverlay extends Overlay
 		GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
 		if (offers == null) return null;
 
-		for (int slot = 0; slot < offers.length && slot < 8; slot++)
+		for (int slot = 0; slot < offers.length && slot < SLOT_WIDGETS.length; slot++)
 		{
 			GrandExchangeOffer offer = offers[slot];
 			if (offer == null) continue;
@@ -81,7 +83,7 @@ public class GrandExchangeOverlay extends Overlay
 			boolean isBuy = (state == GrandExchangeOfferState.BUYING
 					|| state == GrandExchangeOfferState.BOUGHT);
 
-			Widget slotWidget = client.getWidget(GE_GROUP_ID, GE_FIRST_SLOT_CHILD + slot);
+			Widget slotWidget = client.getWidget(SLOT_WIDGETS[slot]);
 			if (slotWidget == null || slotWidget.isHidden()) continue;
 
 			Rectangle bounds = slotWidget.getBounds();
@@ -98,10 +100,10 @@ public class GrandExchangeOverlay extends Overlay
 									  Map<Integer, Long> highPrices,
 									  Map<Integer, Long> lowPrices)
 	{
-		Widget setupWidget = client.getWidget(GE_GROUP_ID, GE_SETUP_CHILD);
+		Widget setupWidget = client.getWidget(InterfaceID.GeOffers.SETUP);
 		if (setupWidget == null || setupWidget.isHidden()) return;
 
-		int itemId = client.getVarpValue(CURRENT_GE_ITEM_VARP);
+		int itemId = client.getVarpValue(VarPlayerID.TRADINGPOST_SEARCH);
 		if (itemId <= 0) return;
 
 		Long apiHigh = highPrices.get(itemId);
@@ -112,7 +114,7 @@ public class GrandExchangeOverlay extends Overlay
 		long offerPrice = findSetupPrice(itemId, setupWidget);
 		if (offerPrice <= 0) return;
 
-		Widget confirmWidget = client.getWidget(GE_GROUP_ID, GE_SETUP_CONFIRM_CHILD);
+		Widget confirmWidget = client.getWidget(InterfaceID.GeOffers.SETUP_CONFIRM);
 		if (confirmWidget == null || confirmWidget.isHidden()) return;
 		Rectangle bounds = confirmWidget.getBounds();
 		if (bounds == null || bounds.width <= 0) return;
@@ -148,7 +150,7 @@ public class GrandExchangeOverlay extends Overlay
 
 	private boolean determineSetupBuyOrSell(Widget setupWidget)
 	{
-		Widget descWidget = client.getWidget(GE_GROUP_ID, GE_SETUP_DESC_CHILD);
+		Widget descWidget = client.getWidget(InterfaceID.GeOffers.SETUP_DESC);
 		if (descWidget != null)
 		{
 			String text = descWidget.getText();
@@ -179,7 +181,7 @@ public class GrandExchangeOverlay extends Overlay
 
 	private long findSetupPrice(int itemId, Widget setupWidget)
 	{
-		Widget descWidget = client.getWidget(GE_GROUP_ID, GE_SETUP_DESC_CHILD);
+		Widget descWidget = client.getWidget(InterfaceID.GeOffers.SETUP_DESC);
 		if (descWidget != null && descWidget.getText() != null)
 		{
 			long price = parsePriceText(descWidget.getText().replaceAll("<[^>]+>", ""));

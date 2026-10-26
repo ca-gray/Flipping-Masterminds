@@ -1,7 +1,10 @@
 package com.flippingmasterminds;
 
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import net.runelite.client.config.ConfigManager;
 
+import java.lang.reflect.Type;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -14,12 +17,14 @@ public class PriceAlertTracker
     private static final int MAX_HISTORY_ENTRIES   = 50;
 
     private final ConfigManager configManager;
+    private final Gson gson;
     private final List<PriceAlert> alerts = new CopyOnWriteArrayList<>();
     private final List<AlertHistoryEntry> history = new CopyOnWriteArrayList<>();
 
-    public PriceAlertTracker(ConfigManager configManager)
+    public PriceAlertTracker(ConfigManager configManager, Gson gson)
     {
         this.configManager = configManager;
+        this.gson          = gson;
         load();
         loadHistory();
     }
@@ -102,16 +107,14 @@ public class PriceAlertTracker
         return new CheckResult(newlyTriggered, newlyStale);
     }
 
-    public void clearTriggered()
+    /** Whether any alert is still waiting to trigger or expire. */
+    public boolean hasActiveAlerts()
     {
-        alerts.removeIf(a -> a.triggered);
-        save();
-    }
-
-    public void clearStale()
-    {
-        alerts.removeIf(a -> a.stale);
-        save();
+        for (PriceAlert a : alerts)
+        {
+            if (!a.triggered && !a.stale) return true;
+        }
+        return false;
     }
 
     public void clearCompleted()
@@ -149,11 +152,46 @@ public class PriceAlertTracker
     }
 
     // ── Alert persistence ───────────────────────────────────────────────────
+    // Stored as JSON. Older versions used a hand-escaped "a,b,c|a,b,c" format,
+    // which is still read once and re-saved as JSON.
+
+    private static final Type ALERT_LIST    = new TypeToken<List<PriceAlert>>() {}.getType();
+    private static final Type HISTORY_LIST  = new TypeToken<List<AlertHistoryEntry>>() {}.getType();
 
     private void load()
     {
         String raw = configManager.getConfiguration(CONFIG_GROUP, CONFIG_KEY);
-        if (raw == null || raw.isEmpty()) return;
+        List<PriceAlert> loaded = parseAlerts(raw, gson);
+        alerts.addAll(loaded);
+        if (raw != null && !raw.isEmpty() && !isJson(raw)) save();
+    }
+
+    static boolean isJson(String raw)
+    {
+        return raw.trim().startsWith("[");
+    }
+
+    static List<PriceAlert> parseAlerts(String raw, Gson gson)
+    {
+        List<PriceAlert> out = new ArrayList<>();
+        if (raw == null || raw.isEmpty()) return out;
+
+        if (isJson(raw))
+        {
+            try
+            {
+                List<PriceAlert> parsed = gson.fromJson(raw, ALERT_LIST);
+                if (parsed != null)
+                {
+                    for (PriceAlert a : parsed)
+                    {
+                        if (a != null && a.itemName != null && a.direction != null) out.add(a);
+                    }
+                }
+            }
+            catch (Exception ignored) {}
+            return out;
+        }
 
         for (String entry : raw.split("\\|"))
         {
@@ -173,30 +211,16 @@ public class PriceAlertTracker
 
                 PriceAlert alert = new PriceAlert(itemId, itemName, target, dir, triggered, stale, created, expiryMs);
                 alert.triggeredPrice = trigPrice;
-                alerts.add(alert);
+                out.add(alert);
             }
             catch (Exception ignored) {}
         }
+        return out;
     }
 
     private void save()
     {
-        StringBuilder sb = new StringBuilder();
-        for (PriceAlert a : alerts)
-        {
-            if (sb.length() > 0) sb.append('|');
-            String safeName = a.itemName.replace(",", "&comma;").replace("|", "&pipe;");
-            sb.append(a.itemId).append(',')
-              .append(safeName).append(',')
-              .append(a.targetPrice).append(',')
-              .append(a.direction.name()).append(',')
-              .append(a.triggered).append(',')
-              .append(a.triggeredPrice).append(',')
-              .append(a.createdAt).append(',')
-              .append(a.stale).append(',')
-              .append(a.expiryMs);
-        }
-        configManager.setConfiguration(CONFIG_GROUP, CONFIG_KEY, sb.toString());
+        configManager.setConfiguration(CONFIG_GROUP, CONFIG_KEY, gson.toJson(new ArrayList<>(alerts), ALERT_LIST));
     }
 
     // ── History persistence ─────────────────────────────────────────────────
@@ -204,7 +228,31 @@ public class PriceAlertTracker
     private void loadHistory()
     {
         String raw = configManager.getConfiguration(CONFIG_GROUP, HISTORY_CONFIG_KEY);
-        if (raw == null || raw.isEmpty()) return;
+        history.addAll(parseHistory(raw, gson));
+        if (raw != null && !raw.isEmpty() && !isJson(raw)) saveHistory();
+    }
+
+    static List<AlertHistoryEntry> parseHistory(String raw, Gson gson)
+    {
+        List<AlertHistoryEntry> out = new ArrayList<>();
+        if (raw == null || raw.isEmpty()) return out;
+
+        if (isJson(raw))
+        {
+            try
+            {
+                List<AlertHistoryEntry> parsed = gson.fromJson(raw, HISTORY_LIST);
+                if (parsed != null)
+                {
+                    for (AlertHistoryEntry h : parsed)
+                    {
+                        if (h != null && h.itemName != null && h.direction != null) out.add(h);
+                    }
+                }
+            }
+            catch (Exception ignored) {}
+            return out;
+        }
 
         for (String entry : raw.split("\\|"))
         {
@@ -221,30 +269,17 @@ public class PriceAlertTracker
                 long      trigPrice   = Long.parseLong(parts[6]);
                 String    outcome     = parts[7];
 
-                history.add(new AlertHistoryEntry(itemId, itemName, target, dir,
+                out.add(new AlertHistoryEntry(itemId, itemName, target, dir,
                         created, completed, trigPrice, outcome));
             }
             catch (Exception ignored) {}
         }
+        return out;
     }
 
     private void saveHistory()
     {
-        StringBuilder sb = new StringBuilder();
-        for (AlertHistoryEntry h : history)
-        {
-            if (sb.length() > 0) sb.append('|');
-            String safeName = h.itemName.replace(",", "&comma;").replace("|", "&pipe;");
-            sb.append(h.itemId).append(',')
-              .append(safeName).append(',')
-              .append(h.targetPrice).append(',')
-              .append(h.direction.name()).append(',')
-              .append(h.createdAt).append(',')
-              .append(h.completedAt).append(',')
-              .append(h.triggeredPrice).append(',')
-              .append(h.outcome);
-        }
-        configManager.setConfiguration(CONFIG_GROUP, HISTORY_CONFIG_KEY, sb.toString());
+        configManager.setConfiguration(CONFIG_GROUP, HISTORY_CONFIG_KEY, gson.toJson(new ArrayList<>(history), HISTORY_LIST));
     }
 
     // ── Types ───────────────────────────────────────────────────────────────

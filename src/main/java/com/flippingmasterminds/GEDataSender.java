@@ -8,11 +8,17 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+/**
+ * Sends GE snapshots to the Flipping Masterminds API (only when an API token is set).
+ * Only the newest snapshot is kept; identical snapshots are skipped, sends are spaced
+ * out, failures back off, and a rejected token pauses sending until it changes.
+ * All state is only touched on the scheduler thread.
+ */
 @Slf4j
 class GEDataSender
 {
 	static final String API_BASE_URL = "https://api.flippingmasterminds.net";
-	static final String PLUGIN_VERSION = "1.0";
+	static final String PLUGIN_VERSION = "1.1";
 
 	enum Status
 	{

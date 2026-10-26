@@ -1,6 +1,10 @@
 package com.flippingmasterminds;
 
+import net.runelite.client.game.ItemManager;
+import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.util.AsyncBufferedImage;
+import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.LinkBrowser;
 
 import javax.imageio.ImageIO;
@@ -58,7 +62,7 @@ public class FlippingMastermindsPanel extends PluginPanel
     // ── Image loading ─────────────────────────────────────────────────────────
     private final ConcurrentMap<Integer, ImageIcon> imageCache = new ConcurrentHashMap<>();
     private final Set<Integer> loadingSet = Collections.newSetFromMap(new ConcurrentHashMap<>());
-    private final ExecutorService imageLoader;
+    private final ItemManager itemManager;
     private final ImageIcon placeholderIcon;
 
     // ── Tab switching ────────────────────────────────────────────────────────
@@ -73,6 +77,8 @@ public class FlippingMastermindsPanel extends PluginPanel
 
     // ── Plugin callback ───────────────────────────────────────────────────────
     private Runnable onRefreshRequested;
+    private Runnable onActivated;
+    private volatile boolean panelOpen;
 
     // ── Tab state ────────────────────────────────────────────────────────────
     private String activeTab = "market";
@@ -85,12 +91,15 @@ public class FlippingMastermindsPanel extends PluginPanel
     private static final int MAX_PAGES      = 10;
     private static final int CARD_ARC       = 10;
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
+    private static final int FILTER_DEBOUNCE_MS = 250;
+
+    private javax.swing.Timer filterDebounce;
 
     // ── UI colours ───────────────────────────────────────────────────────────
-    private static final Color BG_CARD       = new Color(30, 32, 42);
-    private static final Color BORDER_SUBTLE = new Color(44, 47, 58);
-    private static final Color BTN_HOVER_BG  = new Color(60, 60, 60);
-    private static final Color BTN_PRESS_BG  = new Color(90, 90, 90);
+    private static final Color BG_CARD       = ColorScheme.DARKER_GRAY_COLOR;
+    private static final Color BORDER_SUBTLE = ColorScheme.DARK_GRAY_COLOR;
+    private static final Color BTN_HOVER_BG  = ColorScheme.DARKER_GRAY_HOVER_COLOR;
+    private static final Color BTN_PRESS_BG  = ColorScheme.MEDIUM_GRAY_COLOR;
     private static final int   BTN_ARC       = 6;
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -101,16 +110,11 @@ public class FlippingMastermindsPanel extends PluginPanel
      * the layout precisely: fixed header at top, scrollable item list in the
      * middle, fixed pagination bar at the bottom.
      */
-    public FlippingMastermindsPanel()
+    public FlippingMastermindsPanel(ItemManager itemManager)
     {
         super(false);
 
-        imageLoader = Executors.newFixedThreadPool(3, r -> {
-            Thread t = new Thread(r, "ge-panel-image-loader");
-            t.setDaemon(true);
-            return t;
-        });
-
+        this.itemManager = itemManager;
         placeholderIcon = makePlaceholderIcon(ICON_SIZE, ICON_SIZE);
 
         setLayout(new BorderLayout());
@@ -154,10 +158,10 @@ public class FlippingMastermindsPanel extends PluginPanel
         marketView.add(createPaginationPanel(), BorderLayout.SOUTH);
 
         // Alerts view
-        alertPanel = new PriceAlertPanel(imageCache, loadingSet, imageLoader, placeholderIcon);
+        alertPanel = new PriceAlertPanel(imageCache, loadingSet, itemManager, placeholderIcon);
 
         // Buy limits view
-        buyLimitPanel = new BuyLimitPanel(imageCache, loadingSet, imageLoader, placeholderIcon);
+        buyLimitPanel = new BuyLimitPanel(imageCache, loadingSet, itemManager, placeholderIcon);
 
         // Card layout to switch between them
         cardLayout = new CardLayout();
@@ -235,6 +239,31 @@ public class FlippingMastermindsPanel extends PluginPanel
         this.onRefreshRequested = callback;
     }
 
+    /** Called when the panel is opened in the sidebar. */
+    public void setOnActivated(Runnable callback)
+    {
+        this.onActivated = callback;
+    }
+
+    /** Whether the panel is currently open in the sidebar. */
+    public boolean isPanelOpen()
+    {
+        return panelOpen;
+    }
+
+    @Override
+    public void onActivate()
+    {
+        panelOpen = true;
+        if (onActivated != null) onActivated.run();
+    }
+
+    @Override
+    public void onDeactivate()
+    {
+        panelOpen = false;
+    }
+
     public void applyConfig(boolean showVolume, boolean showPrices)
     {
         boolean changed = (this.showVolume != showVolume) || (this.showPrices != showPrices);
@@ -300,11 +329,11 @@ public class FlippingMastermindsPanel extends PluginPanel
         maxPriceField.setToolTipText("Leave empty for no upper limit");
         filterPanel.add(maxPriceField, fld);
 
-        // Row 4 – Min Volume
+        // Row 4 – Min 24h volume
         lbl.gridy++; fld.gridy++;
-        filterPanel.add(new JLabel("Min Volume:"), lbl);
+        filterPanel.add(new JLabel("Min 24h Vol:"), lbl);
         minVolumeField = new JTextField("0");
-        minVolumeField.setToolTipText("Minimum total trades in the selected time window");
+        minVolumeField.setToolTipText("Minimum number of items traded in the last 24 hours");
         filterPanel.add(minVolumeField, fld);
 
         headerPanel.add(filterPanel);
@@ -359,7 +388,7 @@ public class FlippingMastermindsPanel extends PluginPanel
     {
         paginationPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 4));
         paginationPanel.setBorder(
-                BorderFactory.createMatteBorder(1, 0, 0, 0, new Color(60, 60, 60)));
+                BorderFactory.createMatteBorder(1, 0, 0, 0, ColorScheme.DARKER_GRAY_HOVER_COLOR));
 
         JButton prev = new JButton("◀");
         prev.setFocusPainted(false);
@@ -385,9 +414,12 @@ public class FlippingMastermindsPanel extends PluginPanel
     {
         timeRangeDropdown  .addActionListener(e -> refreshWithFilters());
         performanceDropdown.addActionListener(e -> refreshWithFilters());
-        addDocumentListener(minPriceField,  this::refreshWithFilters);
-        addDocumentListener(maxPriceField,  this::refreshWithFilters);
-        addDocumentListener(minVolumeField, this::refreshWithFilters);
+        // Text fields wait for a pause in typing before rebuilding the list.
+        filterDebounce = new javax.swing.Timer(FILTER_DEBOUNCE_MS, e -> refreshWithFilters());
+        filterDebounce.setRepeats(false);
+        addDocumentListener(minPriceField,  filterDebounce::restart);
+        addDocumentListener(maxPriceField,  filterDebounce::restart);
+        addDocumentListener(minVolumeField, filterDebounce::restart);
     }
 
     // ── Public data entry point ───────────────────────────────────────────────
@@ -481,7 +513,7 @@ public class FlippingMastermindsPanel extends PluginPanel
             ItemMeta im = meta.get(id);
             if (im == null) continue;
 
-            rows.add(new Row(id, im.name, truncateName(im.name), im.iconUrl,
+            rows.add(new Row(id, im.name, truncateName(im.name),
                     changePct, changeAbs, volume, snapPrice, curPrice));
         }
 
@@ -502,7 +534,6 @@ public class FlippingMastermindsPanel extends PluginPanel
             {
                 Row r = rows.get(j);
                 page.add(makeRowPanel(r));
-                scheduleImageLoad(r.id, r.iconUrl);
             }
             pages.add(page);
         }
@@ -551,14 +582,14 @@ public class FlippingMastermindsPanel extends PluginPanel
 
         String absText   = (r.changeAbs > 0 ? "+" : "") + formatGp(r.changeAbs);
         Color  changeClr = r.changeAbs >= 0 ? new Color(0, 192, 0) : new Color(220, 50, 50);
-        JLabel changeLabel = new JLabel(String.format("%.2f%% (%s)", r.changePct, absText));
+        JLabel changeLabel = new JLabel(String.format(Locale.ROOT, "%.2f%% (%s)", r.changePct, absText));
         changeLabel.setForeground(changeClr);
         textPanel.add(changeLabel);
 
         // Volume line – shown only when config toggle is on
         if (showVolume && r.volume > 0)
         {
-            JLabel volLabel = new JLabel("Vol: " + formatNumber(r.volume));
+            JLabel volLabel = new JLabel("24h vol: " + formatNumber(r.volume));
             volLabel.setForeground(new Color(140, 140, 180));
             volLabel.setFont(volLabel.getFont().deriveFont(10f));
             textPanel.add(volLabel);
@@ -614,9 +645,9 @@ public class FlippingMastermindsPanel extends PluginPanel
         private boolean notification = false;
         private boolean hovered = false;
 
-        private static final Color ACTIVE_BG       = new Color(50, 54, 72);
-        private static final Color HOVER_BG        = new Color(42, 45, 58);
-        private static final Color INACTIVE_BG     = new Color(28, 30, 38);
+        private static final Color ACTIVE_BG       = ColorScheme.DARKER_GRAY_HOVER_COLOR;
+        private static final Color HOVER_BG        = ColorScheme.DARK_GRAY_COLOR;
+        private static final Color INACTIVE_BG     = ColorScheme.DARKER_GRAY_COLOR;
         private static final Color ACCENT           = new Color(90, 140, 220);
         private static final Color NOTIF_DOT       = new Color(240, 160, 40);
         private static final int TAB_ARC           = 10;
@@ -745,39 +776,27 @@ public class FlippingMastermindsPanel extends PluginPanel
 
     // ── Image loading ─────────────────────────────────────────────────────────
 
-    static void loadIconAsync(int itemId, String iconUrl, int size,
+    /** Load an item icon from the game cache via ItemManager, then run {@code onComplete} on the EDT. */
+    static void loadIconAsync(int itemId, int size,
                               ConcurrentMap<Integer, ImageIcon> cache,
                               Set<Integer> loading,
-                              ExecutorService loader,
+                              ItemManager itemManager,
                               Runnable onComplete)
     {
-        if (cache.containsKey(itemId) || loading.contains(itemId)) return;
-        if (iconUrl == null || iconUrl.isEmpty()) return;
+        if (cache.containsKey(itemId) || !loading.add(itemId)) return;
 
-        loading.add(itemId);
-        loader.submit(() -> {
-            try
-            {
-                BufferedImage img = ImageIO.read(new URL(iconUrl));
-                if (img != null)
-                {
-                    Image scaled = img.getScaledInstance(size, size, Image.SCALE_SMOOTH);
-                    cache.put(itemId, new ImageIcon(scaled));
-                }
-            }
-            catch (Exception ignored) {}
-            finally { loading.remove(itemId); }
-
+        AsyncBufferedImage img = itemManager.getImage(itemId);
+        img.onLoaded(() ->
+        {
+            cache.put(itemId, new ImageIcon(ImageUtil.resizeImage(img, size, size, true)));
+            loading.remove(itemId);
             SwingUtilities.invokeLater(onComplete);
         });
     }
 
-    private void scheduleImageLoad(int id, String rawIconUrl)
+    private void scheduleImageLoad(int id)
     {
-        String urlStr = rawIconUrl != null && rawIconUrl.startsWith("http")
-                ? rawIconUrl : sanitizeIconUrl(rawIconUrl != null ? rawIconUrl : "");
-        loadIconAsync(id, urlStr, ICON_SIZE, imageCache, loadingSet, imageLoader,
-                this::refreshVisibleIcons);
+        loadIconAsync(id, ICON_SIZE, imageCache, loadingSet, itemManager, this::refreshVisibleIcons);
     }
 
     private void refreshVisibleIcons()
@@ -802,8 +821,10 @@ public class FlippingMastermindsPanel extends PluginPanel
                 if (name == null) continue;
                 try
                 {
-                    ImageIcon icon = imageCache.get(Integer.parseInt(name));
+                    int id = Integer.parseInt(name);
+                    ImageIcon icon = imageCache.get(id);
                     if (icon != null) lbl.setIcon(icon);
+                    else scheduleImageLoad(id);
                 }
                 catch (NumberFormatException ignored) {}
             }
@@ -857,18 +878,18 @@ public class FlippingMastermindsPanel extends PluginPanel
     static String formatGp(long gp)
     {
         double abs = Math.abs((double) gp);
-        if (abs >= 1_000_000_000) return String.format("%.1fB", gp / 1_000_000_000.0);
-        if (abs >= 1_000_000)     return String.format("%.1fM", gp / 1_000_000.0);
-        if (abs >= 1_000)         return String.format("%.1fK", gp / 1_000.0);
+        if (abs >= 1_000_000_000) return String.format(Locale.ROOT, "%.1fB", gp / 1_000_000_000.0);
+        if (abs >= 1_000_000)     return String.format(Locale.ROOT, "%.1fM", gp / 1_000_000.0);
+        if (abs >= 1_000)         return String.format(Locale.ROOT, "%.1fK", gp / 1_000.0);
         return gp + " gp";
     }
 
     private static String formatNumber(long num)
     {
         double abs = Math.abs((double) num);
-        if (abs >= 1_000_000_000) return String.format("%.1fB", num / 1_000_000_000.0);
-        if (abs >= 1_000_000)     return String.format("%.1fM", num / 1_000_000.0);
-        if (abs >= 1_000)         return String.format("%.1fK", num / 1_000.0);
+        if (abs >= 1_000_000_000) return String.format(Locale.ROOT, "%.1fB", num / 1_000_000_000.0);
+        if (abs >= 1_000_000)     return String.format(Locale.ROOT, "%.1fM", num / 1_000_000.0);
+        if (abs >= 1_000)         return String.format(Locale.ROOT, "%.1fK", num / 1_000.0);
         return String.valueOf(num);
     }
 
@@ -891,7 +912,7 @@ public class FlippingMastermindsPanel extends PluginPanel
     {
         BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = img.createGraphics();
-        g.setColor(new Color(64, 64, 64));
+        g.setColor(ColorScheme.MEDIUM_GRAY_COLOR);
         g.fillRect(0, 0, w, h);
         g.dispose();
         return new ImageIcon(img);
@@ -904,15 +925,6 @@ public class FlippingMastermindsPanel extends PluginPanel
         return name.substring(0, NAME_LIMIT) + "…";
     }
 
-    private static String sanitizeIconUrl(String raw)
-    {
-        String safe = raw.replace(" ", "_")
-                .replace("'", "%27")
-                .replace("(", "%28")
-                .replace(")", "%29");
-        return "https://oldschool.runescape.wiki/w/Special:FilePath/" + safe;
-    }
-
     private static void addDocumentListener(JTextField field, Runnable onChange)
     {
         field.getDocument().addDocumentListener(new DocumentListener()
@@ -923,11 +935,6 @@ public class FlippingMastermindsPanel extends PluginPanel
         });
     }
 
-    public void dispose()
-    {
-        imageLoader.shutdownNow();
-    }
-
     // ── Row data class ────────────────────────────────────────────────────────
 
     private static class Row
@@ -935,20 +942,18 @@ public class FlippingMastermindsPanel extends PluginPanel
         final int    id;
         final String fullName;
         final String displayName;
-        final String iconUrl;
         final double changePct;
         final long   changeAbs;
         final long   volume;
         final long   snapPrice;
         final long   curPrice;
 
-        Row(int id, String fullName, String displayName, String iconUrl,
+        Row(int id, String fullName, String displayName,
             double changePct, long changeAbs, long volume, long snapPrice, long curPrice)
         {
             this.id          = id;
             this.fullName    = fullName;
             this.displayName = displayName;
-            this.iconUrl     = iconUrl;
             this.changePct   = changePct;
             this.changeAbs   = changeAbs;
             this.volume      = volume;

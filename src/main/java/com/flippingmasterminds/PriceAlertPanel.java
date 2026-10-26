@@ -1,5 +1,8 @@
 package com.flippingmasterminds;
 
+import net.runelite.client.game.ItemManager;
+import net.runelite.client.ui.ColorScheme;
+
 import javax.swing.*;
 import javax.swing.border.Border;
 import javax.swing.event.DocumentEvent;
@@ -12,7 +15,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutorService;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -42,7 +44,7 @@ public class PriceAlertPanel extends JPanel
 
     private final ConcurrentMap<Integer, ImageIcon> imageCache;
     private final Set<Integer> loadingSet;
-    private final ExecutorService imageLoader;
+    private final ItemManager itemManager;
     private final ImageIcon placeholderIcon;
 
     private Border defaultFieldBorder;
@@ -50,7 +52,7 @@ public class PriceAlertPanel extends JPanel
 
     private static final int ICON_SIZE = 32;
     private static final Color TRIGGERED_BG     = new Color(25, 60, 25);
-    private static final Color UNTRIGGERED_BG   = new Color(34, 34, 34);
+    private static final Color UNTRIGGERED_BG   = ColorScheme.DARKER_GRAY_COLOR;
     private static final Color TRIGGERED_BORDER = new Color(50, 140, 50);
     private static final Color STALE_BG         = new Color(60, 50, 20);
     private static final Color STALE_BORDER     = new Color(180, 140, 40);
@@ -62,12 +64,12 @@ public class PriceAlertPanel extends JPanel
 
     public PriceAlertPanel(ConcurrentMap<Integer, ImageIcon> imageCache,
                            Set<Integer> loadingSet,
-                           ExecutorService imageLoader,
+                           ItemManager itemManager,
                            ImageIcon placeholderIcon)
     {
         this.imageCache      = imageCache;
         this.loadingSet      = loadingSet;
-        this.imageLoader     = imageLoader;
+        this.itemManager     = itemManager;
         this.placeholderIcon = placeholderIcon;
 
         setLayout(new BorderLayout());
@@ -257,7 +259,7 @@ public class PriceAlertPanel extends JPanel
     private JPanel createBottomBar()
     {
         JPanel bar = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 4));
-        bar.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, new Color(60, 60, 60)));
+        bar.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, ColorScheme.DARKER_GRAY_HOVER_COLOR));
 
         JButton clearCompleted = new JButton("Clear Completed");
         clearCompleted.setFocusPainted(false);
@@ -360,7 +362,7 @@ public class PriceAlertPanel extends JPanel
                 @Override
                 public void mouseEntered(MouseEvent e)
                 {
-                    resultRow.setBackground(new Color(50, 50, 55));
+                    resultRow.setBackground(ColorScheme.DARKER_GRAY_HOVER_COLOR);
                     resultRow.setOpaque(true);
                 }
 
@@ -616,6 +618,7 @@ public class PriceAlertPanel extends JPanel
     void rebuildAlertList()
     {
         alertListPanel.removeAll();
+        pendingIcons.clear();
 
         if (tracker == null || tracker.getAlerts().isEmpty())
         {
@@ -646,7 +649,7 @@ public class PriceAlertPanel extends JPanel
     {
         Color borderColor = alert.triggered ? TRIGGERED_BORDER
                           : alert.stale     ? STALE_BORDER
-                          : new Color(44, 47, 58);
+                          : ColorScheme.DARK_GRAY_COLOR;
         Color bgColor     = alert.triggered ? TRIGGERED_BG
                           : alert.stale     ? STALE_BG
                           : UNTRIGGERED_BG;
@@ -676,6 +679,7 @@ public class PriceAlertPanel extends JPanel
         iconLabel.setIcon(cached != null ? cached : placeholderIcon);
         if (cached == null)
         {
+            pendingIcons.watch(alert.itemId, iconLabel);
             scheduleIconLoad(alert.itemId);
         }
         row.add(iconLabel, BorderLayout.WEST);
@@ -800,20 +804,24 @@ public class PriceAlertPanel extends JPanel
                     g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
                     g2.setColor(getBackground());
                     g2.fillRoundRect(0, 0, getWidth(), getHeight(), 10, 10);
-                    g2.setColor(new Color(44, 47, 58));
+                    g2.setColor(ColorScheme.DARK_GRAY_COLOR);
                     g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 10, 10);
                     g2.dispose();
                 }
             };
             hRow.setOpaque(false);
-            hRow.setBackground(new Color(28, 30, 38));
+            hRow.setBackground(ColorScheme.DARKER_GRAY_COLOR);
             hRow.setBorder(BorderFactory.createEmptyBorder(6, 10, 6, 10));
             hRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 50));
 
             JLabel iconLbl = new JLabel();
             ImageIcon cached = imageCache.get(h.itemId);
             iconLbl.setIcon(cached != null ? cached : placeholderIcon);
-            if (cached == null) scheduleIconLoad(h.itemId);
+            if (cached == null)
+            {
+                pendingIcons.watch(h.itemId, iconLbl);
+                scheduleIconLoad(h.itemId);
+            }
             hRow.add(iconLbl, BorderLayout.WEST);
 
             JPanel textPanel = new JPanel();
@@ -862,13 +870,12 @@ public class PriceAlertPanel extends JPanel
 
     // ── Image loading ────────────────────────────────────────────────────────
 
+    private final PendingIcons pendingIcons = new PendingIcons();
+
     private void scheduleIconLoad(int itemId)
     {
-        if (meta == null) return;
-        ItemMeta im = meta.get(itemId);
-        if (im == null) return;
-        FlippingMastermindsPanel.loadIconAsync(itemId, im.iconUrl, ICON_SIZE,
-                imageCache, loadingSet, imageLoader, this::rebuildAlertList);
+        FlippingMastermindsPanel.loadIconAsync(itemId, ICON_SIZE,
+                imageCache, loadingSet, itemManager, () -> pendingIcons.apply(imageCache));
     }
 
     // ── Formatting ───────────────────────────────────────────────────────────
