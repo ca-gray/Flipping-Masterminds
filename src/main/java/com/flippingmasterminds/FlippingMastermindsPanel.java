@@ -2,6 +2,7 @@ package com.flippingmasterminds;
 
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
+import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
 import net.runelite.client.util.AsyncBufferedImage;
 import net.runelite.client.util.ImageUtil;
@@ -353,7 +354,7 @@ public class FlippingMastermindsPanel extends PluginPanel
 
         lastUpdatedLabel = new JLabel("Not yet loaded");
         lastUpdatedLabel.setForeground(Color.GRAY);
-        lastUpdatedLabel.setFont(lastUpdatedLabel.getFont().deriveFont(10f));
+        lastUpdatedLabel.setFont(FontManager.getRunescapeSmallFont());
         refreshRow.add(lastUpdatedLabel);
 
         headerPanel.add(refreshRow);
@@ -591,7 +592,7 @@ public class FlippingMastermindsPanel extends PluginPanel
         {
             JLabel volLabel = new JLabel("24h vol: " + formatNumber(r.volume));
             volLabel.setForeground(new Color(140, 140, 180));
-            volLabel.setFont(volLabel.getFont().deriveFont(10f));
+            volLabel.setFont(FontManager.getRunescapeSmallFont());
             textPanel.add(volLabel);
         }
 
@@ -600,7 +601,7 @@ public class FlippingMastermindsPanel extends PluginPanel
         {
             JLabel priceLabel = new JLabel(formatGp(r.snapPrice) + " → " + formatGp(r.curPrice));
             priceLabel.setForeground(new Color(180, 160, 100));
-            priceLabel.setFont(priceLabel.getFont().deriveFont(10f));
+            priceLabel.setFont(FontManager.getRunescapeSmallFont());
             priceLabel.setToolTipText("Price at start of window → Current price");
             textPanel.add(priceLabel);
         }

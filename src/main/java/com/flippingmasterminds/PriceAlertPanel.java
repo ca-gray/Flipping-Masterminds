@@ -2,6 +2,7 @@ package com.flippingmasterminds;
 
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
+import net.runelite.client.ui.FontManager;
 
 import javax.swing.*;
 import javax.swing.border.Border;
@@ -126,7 +127,7 @@ public class PriceAlertPanel extends JPanel
         form.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
 
         JLabel title = new JLabel("Add Price Alert");
-        title.setFont(title.getFont().deriveFont(Font.BOLD, 13f));
+        title.setFont(FontManager.getRunescapeBoldFont());
         title.setAlignmentX(Component.LEFT_ALIGNMENT);
         form.add(title);
         form.add(Box.createVerticalStrut(6));
@@ -204,13 +205,14 @@ public class PriceAlertPanel extends JPanel
 
         // Discord command input
         JLabel discordLabel = new JLabel("Or paste Discord command:");
-        discordLabel.setFont(discordLabel.getFont().deriveFont(Font.BOLD, 11f));
+        discordLabel.setFont(FontManager.getRunescapeBoldFont());
         discordLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
         form.add(discordLabel);
         form.add(Box.createVerticalStrut(2));
 
-        JLabel discordHint = new JLabel("Use /track_price in the FMM Discord to generate a command");
-        discordHint.setFont(discordHint.getFont().deriveFont(Font.ITALIC, 9f));
+        JLabel discordHint = new JLabel("Get one with /track_price in Discord");
+        discordHint.setToolTipText("Use /track_price in the FMM Discord to generate a command");
+        discordHint.setFont(FontManager.getRunescapeSmallFont());
         discordHint.setForeground(new Color(130, 130, 150));
         discordHint.setAlignmentX(Component.LEFT_ALIGNMENT);
         form.add(discordHint);
@@ -230,7 +232,7 @@ public class PriceAlertPanel extends JPanel
         form.add(parseBtn);
 
         discordStatus = new JLabel(" ");
-        discordStatus.setFont(discordStatus.getFont().deriveFont(10f));
+        discordStatus.setFont(FontManager.getRunescapeSmallFont());
         discordStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
         form.add(discordStatus);
 
@@ -341,7 +343,7 @@ public class PriceAlertPanel extends JPanel
                 priceStr = " (" + formatGp(currentPrices.get(im.id)) + ")";
             }
             JLabel nameLabel = new JLabel(im.name + priceStr);
-            nameLabel.setFont(nameLabel.getFont().deriveFont(11f));
+            nameLabel.setFont(FontManager.getRunescapeSmallFont());
             resultRow.add(nameLabel, BorderLayout.CENTER);
 
             resultRow.addMouseListener(new MouseAdapter()
@@ -457,7 +459,7 @@ public class PriceAlertPanel extends JPanel
 
         if (movement == null)
         {
-            discordStatus.setText("Missing movement (Rises To / Falls To).");
+            discordStatus.setText("Missing movement (Rises/Falls).");
             discordStatus.setForeground(new Color(200, 100, 100));
             return;
         }
@@ -511,7 +513,7 @@ public class PriceAlertPanel extends JPanel
 
         if (resolvedId <= 0)
         {
-            discordStatus.setText("Could not resolve item. Provide item_id or item_name.");
+            discordStatus.setText("Unknown item: add item_id.");
             discordStatus.setForeground(new Color(200, 100, 100));
             return;
         }
@@ -693,7 +695,7 @@ public class PriceAlertPanel extends JPanel
         if (name.length() > 20) name = name.substring(0, 20) + "...";
         JLabel nameLabel = new JLabel(name);
         nameLabel.setForeground(Color.WHITE);
-        nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD, 12f));
+        nameLabel.setFont(FontManager.getRunescapeBoldFont());
         nameLabel.setToolTipText(alert.itemName);
         textPanel.add(nameLabel);
 
@@ -705,21 +707,22 @@ public class PriceAlertPanel extends JPanel
         JLabel condLabel = new JLabel(dirEmoji + dirText + formatGp(alert.targetPrice));
         condLabel.setForeground(alert.direction == PriceAlertTracker.Direction.BELOW
                 ? new Color(220, 140, 140) : new Color(140, 200, 140));
-        condLabel.setFont(condLabel.getFont().deriveFont(11f));
+        condLabel.setFont(FontManager.getRunescapeSmallFont());
         textPanel.add(condLabel);
 
         if (alert.triggered)
         {
             JLabel trigLabel = new JLabel("✅ Triggered at " + formatGp(alert.triggeredPrice));
             trigLabel.setForeground(new Color(80, 200, 80));
-            trigLabel.setFont(trigLabel.getFont().deriveFont(Font.BOLD, 10f));
+            trigLabel.setFont(FontManager.getRunescapeBoldFont());
             textPanel.add(trigLabel);
         }
         else if (alert.stale)
         {
-            JLabel staleLabel = new JLabel("⚠ Expired after " + formatDuration(alert.expiryMs) + " — never reached target");
+            JLabel staleLabel = new JLabel("⚠ Expired after " + formatDuration(alert.expiryMs));
+            staleLabel.setToolTipText("Never reached the target price within " + formatDuration(alert.expiryMs));
             staleLabel.setForeground(new Color(220, 170, 50));
-            staleLabel.setFont(staleLabel.getFont().deriveFont(Font.BOLD, 10f));
+            staleLabel.setFont(FontManager.getRunescapeBoldFont());
             textPanel.add(staleLabel);
         }
         else
@@ -739,16 +742,17 @@ public class PriceAlertPanel extends JPanel
             if (currentPrices != null && currentPrices.containsKey(alert.itemId))
             {
                 long cur = currentPrices.get(alert.itemId);
-                JLabel curLabel = new JLabel("Current: " + formatGp(cur) + "  ·  Set " + ageText + "  ·  " + timeLeft);
+                JLabel curLabel = new JLabel("Now " + formatGp(cur) + " · " + timeLeft);
+                curLabel.setToolTipText("Current price " + formatGp(cur) + ", set " + ageText + ", " + timeLeft);
                 curLabel.setForeground(new Color(140, 140, 140));
-                curLabel.setFont(curLabel.getFont().deriveFont(10f));
+                curLabel.setFont(FontManager.getRunescapeSmallFont());
                 textPanel.add(curLabel);
             }
             else
             {
-                JLabel ageLabel = new JLabel("Set " + ageText + "  ·  " + timeLeft);
+                JLabel ageLabel = new JLabel("Set " + ageText + " · " + timeLeft);
                 ageLabel.setForeground(new Color(140, 140, 140));
-                ageLabel.setFont(ageLabel.getFont().deriveFont(10f));
+                ageLabel.setFont(FontManager.getRunescapeSmallFont());
                 textPanel.add(ageLabel);
             }
         }
@@ -784,11 +788,15 @@ public class PriceAlertPanel extends JPanel
 
         alertListPanel.add(Box.createVerticalStrut(8));
         JLabel header = new JLabel("📜 Alert History");
-        header.setFont(header.getFont().deriveFont(Font.BOLD, 12f));
+        header.setFont(FontManager.getRunescapeBoldFont());
         header.setForeground(new Color(180, 180, 180));
         header.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 0));
-        header.setAlignmentX(Component.LEFT_ALIGNMENT);
-        alertListPanel.add(header);
+        // Full-width row like the alert rows, so BoxLayout doesn't push a
+        // left-aligned label out to the centre line.
+        JPanel headerRow = new JPanel(new BorderLayout());
+        headerRow.add(header, BorderLayout.WEST);
+        headerRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, header.getPreferredSize().height));
+        alertListPanel.add(headerRow);
         alertListPanel.add(Box.createVerticalStrut(4));
 
         for (int idx = 0; idx < hist.size(); idx++)
@@ -831,7 +839,7 @@ public class PriceAlertPanel extends JPanel
             String shortName = h.itemName.length() > 20 ? h.itemName.substring(0, 20) + "..." : h.itemName;
             String dirText = h.direction == PriceAlertTracker.Direction.BELOW ? "Below " : "Above ";
             JLabel nameLine = new JLabel(shortName + " — " + dirText + formatGp(h.targetPrice));
-            nameLine.setFont(nameLine.getFont().deriveFont(10f));
+            nameLine.setFont(FontManager.getRunescapeSmallFont());
             nameLine.setForeground(new Color(160, 160, 160));
             nameLine.setToolTipText(h.itemName);
             textPanel.add(nameLine);
@@ -843,7 +851,7 @@ public class PriceAlertPanel extends JPanel
             long ago = (System.currentTimeMillis() - h.completedAt) / (60 * 60 * 1000L);
             String agoText = ago < 1 ? "just now" : ago < 24 ? ago + "h ago" : (ago / 24) + "d ago";
             JLabel outLine = new JLabel(outcomeText + "  ·  " + agoText);
-            outLine.setFont(outLine.getFont().deriveFont(10f));
+            outLine.setFont(FontManager.getRunescapeSmallFont());
             outLine.setForeground(triggered ? new Color(80, 160, 80) : new Color(180, 140, 50));
             textPanel.add(outLine);
 

@@ -2,6 +2,7 @@ package com.flippingmasterminds;
 
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
+import net.runelite.client.ui.FontManager;
 
 import javax.swing.*;
 import java.awt.*;
@@ -45,12 +46,12 @@ public class BuyLimitPanel extends JPanel
         header.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
 
         JLabel title = new JLabel("⏱ Buy Limit Cooldowns");
-        title.setFont(title.getFont().deriveFont(Font.BOLD, 13f));
+        title.setFont(FontManager.getRunescapeBoldFont());
         title.setAlignmentX(Component.LEFT_ALIGNMENT);
         header.add(title);
 
-        JLabel subtitle = new JLabel("Active 4-hour GE buy limit windows");
-        subtitle.setFont(subtitle.getFont().deriveFont(10f));
+        JLabel subtitle = new JLabel("Active 4-hour buy limit windows");
+        subtitle.setFont(FontManager.getRunescapeSmallFont());
         subtitle.setForeground(Color.GRAY);
         subtitle.setAlignmentX(Component.LEFT_ALIGNMENT);
         header.add(subtitle);
@@ -190,7 +191,7 @@ public class BuyLimitPanel extends JPanel
     private void addAccountHeader(String text)
     {
         JLabel label = new JLabel(text);
-        label.setFont(label.getFont().deriveFont(Font.BOLD, 11f));
+        label.setFont(FontManager.getRunescapeBoldFont());
         label.setForeground(ColorScheme.BRAND_ORANGE);
         label.setBorder(BorderFactory.createEmptyBorder(8, 4, 4, 4));
         JPanel wrap = new JPanel(new BorderLayout());
@@ -315,12 +316,12 @@ public class BuyLimitPanel extends JPanel
         String shortName = itemName.length() > 22 ? itemName.substring(0, 22) + "..." : itemName;
         JLabel nameLabel = new JLabel(shortName);
         nameLabel.setForeground(Color.WHITE);
-        nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD, 12f));
+        nameLabel.setFont(FontManager.getRunescapeBoldFont());
         nameLabel.setToolTipText(itemName);
         center.add(nameLabel);
 
         JLabel infoLabel = new JLabel(qty + " bought  ·  resets in " + timeStr);
-        infoLabel.setFont(infoLabel.getFont().deriveFont(10f));
+        infoLabel.setFont(FontManager.getRunescapeSmallFont());
         infoLabel.setForeground(new Color(150, 160, 190));
         center.add(infoLabel);
 
@@ -345,7 +346,8 @@ public class BuyLimitPanel extends JPanel
     {
         JPanel empty = new JPanel(new GridBagLayout());
         empty.setBorder(BorderFactory.createEmptyBorder(30, 10, 30, 10));
-        JLabel emptyLabel = new JLabel(text);
+        // HTML with a fixed width lets longer messages wrap instead of running off the panel.
+        JLabel emptyLabel = new JLabel("<html><div style='text-align:center;width:150px'>" + text + "</div></html>");
         emptyLabel.setForeground(Color.GRAY);
         empty.add(emptyLabel);
         listPanel.add(empty);
