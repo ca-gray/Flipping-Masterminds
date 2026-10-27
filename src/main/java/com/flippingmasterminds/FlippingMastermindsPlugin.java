@@ -24,7 +24,7 @@ import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.events.RuneScapeProfileChanged;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.chatbox.ChatboxPanelManager;
-import net.runelite.client.RuneLite;
+import net.runelite.client.util.Filepath;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
@@ -38,7 +38,7 @@ import okhttp3.OkHttpClient;
 import javax.inject.Inject;
 import javax.swing.*;
 import java.awt.image.BufferedImage;
-import java.io.File;
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -48,7 +48,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @PluginDescriptor(
 		name = "Flipping Masterminds",
 		description = "Market movers, price alerts, buy limit tracking and an extended, searchable GE trade history",
-		tags = {"grand exchange", "prices", "flipping", "merching", "trade history", "buy limit", "alerts"}
+		tags = {"grand exchange", "prices", "flipping", "merching", "trade history", "buy limit", "alerts"},
+		// Data folder: .runelite/plugin-data/flipping-masterminds. RuneLite moves the folder
+		// older versions used (.runelite/flipping-masterminds) there on first use.
+		internalName = "flipping-masterminds",
+		legacyDataDirectory = "flipping-masterminds"
 )
 public class FlippingMastermindsPlugin extends Plugin
 {
@@ -102,7 +106,6 @@ public class FlippingMastermindsPlugin extends Plugin
 	private GeHistoryExtender geHistory;
 	private GeOfferValueExpander offerValues;
 
-	private static final File HISTORY_DIR = new File(RuneLite.RUNELITE_DIR, "flipping-masterminds");
 
 
 	// ── Price data held in memory ─────────────────────────────────────────────
@@ -129,7 +132,7 @@ public class FlippingMastermindsPlugin extends Plugin
 		scheduler = stpe;
 
 		geHistory = new GeHistoryExtender(client, clientThread, chatboxPanelManager, itemManager,
-				new GeHistoryStore(HISTORY_DIR, gson, scheduler), config,
+				new GeHistoryStore(historyDirectory(), gson, scheduler), config,
 				tooltipManager, this::getLatestHigh, this::getLatestLow);
 
 		offerValues = new GeOfferValueExpander(client, config);
@@ -252,6 +255,20 @@ public class FlippingMastermindsPlugin extends Plugin
 		// delayed tasks are dropped by the executor's shutdown policy.
 		if (scheduler != null) scheduler.shutdown();
 		scheduler = null;
+	}
+
+	/** The plugin's data folder from RuneLite, or null (history then isn't saved) if it can't be opened. */
+	private Filepath historyDirectory()
+	{
+		try
+		{
+			return getPluginDirectory();
+		}
+		catch (IOException e)
+		{
+			log.warn("Could not open plugin data directory; GE history won't be saved: {}", e.toString());
+			return null;
+		}
 	}
 
 	// ── Game-state events ─────────────────────────────────────────────────────

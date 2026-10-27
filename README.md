@@ -84,7 +84,7 @@ The in-game GE trade history only keeps your most recent trades. Flipping Master
 
 [![image.png](https://i.postimg.cc/bJ4xc7F0/image.png)](https://postimg.cc/dkmkGxFD)
 
-Trades are saved locally per account in `.runelite/flipping-masterminds/`. Trades made outside RuneLite (e.g. mobile) are picked up from the game's list the next time you open the history in RuneLite. Trade times are when you collected the trade in RuneLite, and are only shown when known.
+Trades are saved locally per account in `.runelite/plugin-data/flipping-masterminds/`. Trades made outside RuneLite (e.g. mobile) are picked up from the game's list the next time you open the history in RuneLite. Trade times are when you collected the trade in RuneLite, and are only shown when known.
 
 ---
 
@@ -122,7 +122,7 @@ Each snapshot contains your character name, RuneLite account hash, your GE slots
 
 > GE monitoring requires a valid API token. If no token is set, no data is ever sent to the Flipping Masterminds API. Run `/generate_api_token` in the FMM Discord to get your token.
 
-Your extended trade history is never sent anywhere; it stays in `.runelite/flipping-masterminds/` on your computer.
+Your extended trade history is never sent anywhere; it stays in `.runelite/plugin-data/flipping-masterminds/` on your computer.
 
 ---
 

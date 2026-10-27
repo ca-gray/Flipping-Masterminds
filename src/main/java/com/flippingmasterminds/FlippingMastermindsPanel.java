@@ -8,7 +8,6 @@ import net.runelite.client.util.AsyncBufferedImage;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.LinkBrowser;
 
-import javax.imageio.ImageIO;
 import javax.swing.*;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
@@ -16,8 +15,6 @@ import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
-import java.io.IOException;
-import java.net.URL;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -180,16 +177,13 @@ public class FlippingMastermindsPanel extends PluginPanel
     {
         try
         {
-            URL res = getClass().getResource(resourcePath);
-            if (res != null)
-            {
-                BufferedImage raw = ImageIO.read(res);
-                Image scaled = raw.getScaledInstance(TAB_ICON_SIZE, TAB_ICON_SIZE, Image.SCALE_SMOOTH);
-                return new ImageIcon(scaled);
-            }
+            BufferedImage raw = ImageUtil.loadImageResource(getClass(), resourcePath);
+            return new ImageIcon(ImageUtil.resizeImage(raw, TAB_ICON_SIZE, TAB_ICON_SIZE));
         }
-        catch (IOException ignored) {}
-        return null;
+        catch (Exception e)
+        {
+            return null;
+        }
     }
 
     private void switchTab(String tab)
@@ -741,19 +735,10 @@ public class FlippingMastermindsPanel extends PluginPanel
         AnimatedButton btn = new AnimatedButton();
         try
         {
-            URL res = getClass().getResource(resourcePath);
-            if (res != null)
-            {
-                BufferedImage raw    = ImageIO.read(res);
-                Image         scaled = raw.getScaledInstance(24, 24, Image.SCALE_SMOOTH);
-                btn.setIcon(new ImageIcon(scaled));
-            }
-            else
-            {
-                btn.setText("?");
-            }
+            BufferedImage raw = ImageUtil.loadImageResource(getClass(), resourcePath);
+            btn.setIcon(new ImageIcon(ImageUtil.resizeImage(raw, 24, 24)));
         }
-        catch (IOException e)
+        catch (Exception e)
         {
             btn.setText("?");
         }
