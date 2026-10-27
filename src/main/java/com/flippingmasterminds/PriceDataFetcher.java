@@ -10,8 +10,7 @@ import okhttp3.Request;
 import okhttp3.Response;
 
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
+import java.io.Reader;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
@@ -88,7 +87,7 @@ class PriceDataFetcher
 				throw new IOException("Failed to fetch latest prices: " + response.code());
 			}
 
-			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream(), StandardCharsets.UTF_8))
+			try (Reader reader = response.body().charStream())
 			{
 				Map<Integer, Long> map    = new HashMap<>();
 				Map<Integer, Long> high   = new HashMap<>();
@@ -138,7 +137,7 @@ class PriceDataFetcher
 				throw new IOException("Failed to fetch prices: " + response.code());
 			}
 
-			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream(), StandardCharsets.UTF_8))
+			try (Reader reader = response.body().charStream())
 			{
 				Map<Integer, Long> prices = new HashMap<>();
 				Map<Integer, Long> volume = new HashMap<>();
@@ -196,7 +195,7 @@ class PriceDataFetcher
 				throw new IOException("Failed to fetch item meta: " + response.code());
 			}
 
-			try (InputStreamReader reader = new InputStreamReader(response.body().byteStream(), StandardCharsets.UTF_8))
+			try (Reader reader = response.body().charStream())
 			{
 				return parseMapping(gson.fromJson(reader, JsonArray.class));
 			}

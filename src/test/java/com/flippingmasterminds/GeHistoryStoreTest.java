@@ -1,6 +1,7 @@
 package com.flippingmasterminds;
 
 import com.google.gson.Gson;
+import net.runelite.client.util.Filepath;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -29,7 +30,7 @@ public class GeHistoryStoreTest
 
 	private GeHistoryStore newStore()
 	{
-		return new GeHistoryStore(tmp.getRoot(), new Gson(), Runnable::run);
+		return new GeHistoryStore(Filepath.Unchecked.getRooted(tmp.getRoot().toPath()), new Gson(), Runnable::run);
 	}
 
 	/** Trade with a distinct total so rows are distinguishable. */

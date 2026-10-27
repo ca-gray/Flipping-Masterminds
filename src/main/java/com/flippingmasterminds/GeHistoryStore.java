@@ -3,10 +3,11 @@ package com.flippingmasterminds;
 import com.google.gson.Gson;
 import lombok.extern.slf4j.Slf4j;
 
-import java.io.File;
+import net.runelite.client.util.Filepath;
+
 import java.io.IOException;
+import java.io.Reader;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
@@ -20,6 +21,7 @@ import java.util.concurrent.RejectedExecutionException;
  * fell off the bottom are archived. Live-recorded trades fill the gap when the native
  * list turned over completely between syncs.
  *
+ * Files live in the plugin's data directory (RuneLite's Filepath API), one per account.
  * Client thread only; disk writes go to {@code ioExecutor}.
  */
 @Slf4j
@@ -28,7 +30,8 @@ class GeHistoryStore
 	/** Cap on live records kept between syncs. */
 	private static final int MAX_LIVE = 2_000;
 
-	private final File directory;
+	/** Plugin data directory, or null if it couldn't be opened (history is then kept in memory only). */
+	private final Filepath directory;
 	private final Gson gson;
 	private final Executor ioExecutor;
 
@@ -49,7 +52,7 @@ class GeHistoryStore
 		}
 	}
 
-	GeHistoryStore(File directory, Gson gson, Executor ioExecutor)
+	GeHistoryStore(Filepath directory, Gson gson, Executor ioExecutor)
 	{
 		this.directory  = directory;
 		this.gson       = gson;
@@ -60,7 +63,7 @@ class GeHistoryStore
 	void preload(long hash)
 	{
 		if (hash == -1 || hash == accountHash) return;
-		File file = fileFor(hash);
+		Filepath file = fileFor(hash);
 		try
 		{
 			ioExecutor.execute(() ->
@@ -255,19 +258,18 @@ class GeHistoryStore
 
 	// ── Persistence ──────────────────────────────────────────────────────────
 
-	private File fileFor(long hash)
+	private Filepath fileFor(long hash)
 	{
-		return new File(directory, "ge-history-" + hash + ".json");
+		return directory == null ? null : directory.joinSegment("ge-history-" + hash + ".json");
 	}
 
-	private AccountData load(File file)
+	private AccountData load(Filepath file)
 	{
-		if (file.exists())
+		if (file != null && file.exists())
 		{
-			try
+			try (Reader reader = file.openReader())
 			{
-				String json = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
-				AccountData loaded = gson.fromJson(json, AccountData.class);
+				AccountData loaded = gson.fromJson(reader, AccountData.class);
 				if (loaded != null)
 				{
 					loaded.fillDefaults();
@@ -287,12 +289,13 @@ class GeHistoryStore
 	private void save()
 	{
 		if (data == null) return;
+		Filepath file = fileFor(accountHash);
+		if (file == null) return;
 		// Copy the lists so the JSON can be built on the IO thread, off the game thread.
 		AccountData copy = new AccountData();
 		copy.archive    = new ArrayList<>(data.archive);
 		copy.lastNative = data.lastNative == null ? null : new ArrayList<>(data.lastNative);
 		copy.live       = new ArrayList<>(data.live);
-		File file = fileFor(accountHash);
 		try
 		{
 			ioExecutor.execute(() -> write(file, gson.toJson(copy)));
@@ -302,26 +305,22 @@ class GeHistoryStore
 		}
 	}
 
-	private void write(File file, String json)
+	private void write(Filepath file, String json)
 	{
 		try
 		{
-			if (!directory.exists() && !directory.mkdirs())
-			{
-				log.warn("Could not create {}", directory);
-				return;
-			}
-			// Unique temp file so overlapping writers (e.g. a quick plugin restart) never share one.
-			java.nio.file.Path tmp = Files.createTempFile(directory.toPath(), file.getName(), ".tmp");
+			directory.createDirectories();
+			// Write to a unique temp file, then swap it in, so a crash never leaves a half-written
+			// file and overlapping writers (e.g. a quick plugin restart) never share one.
+			Filepath tmp = directory.createTempFile(file.getFileName(), ".tmp");
 			try
 			{
-				Files.write(tmp, json.getBytes(StandardCharsets.UTF_8));
-				Files.move(tmp, file.toPath(),
-						StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+				tmp.write(json.getBytes(StandardCharsets.UTF_8));
+				tmp.moveTo(file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
 			}
 			finally
 			{
-				Files.deleteIfExists(tmp);
+				tmp.deleteIfExists();
 			}
 		}
 		catch (IOException e)
